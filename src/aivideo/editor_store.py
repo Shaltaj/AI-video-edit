@@ -79,8 +79,8 @@ class EditorStore:
             spec = upgrade_plan(spec)
             self.validate(spec, path)
             self.remember(variant, raw)
-            if raw.get("schema_version") == 1:
-                backup = self.root / "backups" / f"{variant}-v1.json"
+            if raw.get("schema_version") in (1, 2):
+                backup = self.root / "backups" / f"{variant}-v{raw['schema_version']}.json"
                 if not backup.exists():
                     atomic_json(backup, {**raw, "analysis": str(self.analysis)})
             if digest(load_json(path)) != expected:
@@ -136,7 +136,10 @@ class EditorStore:
 def movie_digest(spec: dict, path: Path) -> str:
     """Ignores editorial prose and path spelling; includes all rendered content."""
     spec = upgrade_plan(spec)
-    return digest({"analysis": str((path.parent / spec["analysis"]).resolve()),
-                   "settings": spec.get("settings", {}), "shots": [
-                       {k: v for k, v in shot.items() if k != "purpose"} for shot in spec["shots"]],
-                   "titles": spec.get("titles", [])})
+    content = {"analysis": str((path.parent / spec["analysis"]).resolve()),
+               "settings": spec.get("settings", {}), "shots": [
+                   {k: v for k, v in shot.items() if k != "purpose"} for shot in spec["shots"]],
+               "titles": spec.get("titles", [])}
+    if spec.get("transitions"):
+        content["transitions"] = spec["transitions"]
+    return digest(content)

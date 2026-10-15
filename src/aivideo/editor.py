@@ -230,7 +230,8 @@ class EditorHandler(BaseHTTPRequestHandler):
         if route.path == "/api/history":
             return self.send_json(self.app.store.history(variant))
         if route.path == "/api/jobs":
-            return self.send_json(self.app.jobs.list())
+            return self.send_json([self.app.proxy_payload(j) if j["kind"] == "transition_preview" else j
+                                   for j in self.app.jobs.list()])
         return self.send_json({"error": "Не найдено"}, 404)
 
     def do_POST(self):
@@ -264,6 +265,9 @@ class EditorHandler(BaseHTTPRequestHandler):
                 value = self.app.jobs.add_render(variant, body["revision"])
             elif route == "/api/proxy":
                 value = self.app.proxy_payload(self.app.jobs.proxy(body["source_id"], **self.app.proxy_options))
+            elif route == "/api/transition-preview":
+                value = self.app.proxy_payload(self.app.jobs.transition_preview(
+                    variant, body["revision"], body["from_shot_id"], body["to_shot_id"]))
             elif route == "/api/thumbnail":
                 entry = next((e for e in self.app.catalog if e["id"] == body["entry_id"]), None)
                 if not entry:

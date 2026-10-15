@@ -17,8 +17,16 @@ def execute(job_path: Path) -> None:
         if job["kind"] == "render":
             state = render(Path(job["snapshot"]), Path(job["output"]), cache=Path(job["cache"]))
             job["result"] = {"frames": state["validation"]["frames"],
-                             "duration_s": state["duration_s"], "shots": len(state["shots"]),
-                             "cached_shots": sum(s["cache_hit"] for s in state["shots"])}
+                             "duration_s": state["duration_s"], "shots": job["total_shots"],
+                             "sections": len(state["shots"]), "transitions": state["transition_count"],
+                             "cache_counts": state["cache_counts"],
+                             "cached_shots": state["cache_counts"]["body"]["cached"],
+                             "cached_sections": sum(s["cache_hit"] for s in state["shots"])}
+        elif job["kind"] == "transition_preview":
+            from .render import load_plan
+            from .transitions import render_preview
+            job["result"] = render_preview(load_plan(Path(job["snapshot"])), job["from_shot_id"], job["to_shot_id"],
+                                           Path(job["target"]), Path(job["cache"]), job_path.parent / "progress.json")
         elif job["kind"] == "proxy":
             target = Path(job["target"])
             target.parent.mkdir(parents=True, exist_ok=True)

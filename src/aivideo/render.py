@@ -43,6 +43,8 @@ def upgrade_plan(spec: dict) -> dict:
             shot.pop("title", None)
             cursor = round(cursor + duration, 6)
         value.update(schema_version=2, titles=titles)
+    if value.get("schema_version") == 2:
+        value.update(schema_version=3, transitions=[])
     return value
 
 
@@ -61,8 +63,10 @@ def load_plan(path: Path) -> dict:
 
 def resolve_plan(plan: dict, path: Path, *, allow_title_errors: bool = False) -> dict:
     path = path.resolve()
-    if not isinstance(plan, dict) or plan.get("schema_version") not in (1, 2):
+    if not isinstance(plan, dict) or plan.get("schema_version") not in (1, 2, 3):
         raise AnalysisError("Неизвестная версия монтажного плана")
+    if plan["schema_version"] < 3 and plan.get("transitions"):
+        raise AnalysisError("Переходы требуют schema_version: 3")
     analysis = (path.parent / plan["analysis"]).resolve()
     index = load_json(analysis / "media-index.json")
     source = Path(index["source_root"]).resolve()
@@ -163,8 +167,8 @@ def resolve_plan(plan: dict, path: Path, *, allow_title_errors: bool = False) ->
                 raise AnalysisError(f"{label}: наплыв длиннее сцены")
         if "title" in shot and (not isinstance(shot["title"], str) or len(shot["title"]) > 200):
             raise AnalysisError(f"{label}: титр должен быть строкой до 200 символов")
-        if plan["schema_version"] == 2 and "title" in shot:
-            raise AnalysisError("В формате 2 титры хранятся отдельно от сцен")
+        if plan["schema_version"] >= 2 and "title" in shot:
+            raise AnalysisError("В форматах 2 и 3 титры хранятся отдельно от сцен")
         resolved.append({**shot, "kind": item["kind"], "start_s": start, "end_s": end,
                          "duration_s": duration, "frames": frames, "media": item,
                          "timeline_start_s": cursor_frames / settings["fps"],
@@ -172,10 +176,12 @@ def resolve_plan(plan: dict, path: Path, *, allow_title_errors: bool = False) ->
                          "audio": {**audio, "gain": gain}, "audio_media": audio_item,
                          "audio_start_s": audio_start, "evidence": evidence})
         cursor_frames += frames
+    from .transitions import resolve_timeline
+    transitions, cursor_frames, edit_errors = resolve_timeline(plan, resolved, settings["fps"])
     titles = upgrade_plan(plan).get("titles", [])
     if not isinstance(titles, list):
         raise AnalysisError("titles должен быть списком")
-    title_ids, title_errors = set(), []
+    title_ids, title_errors = set(), edit_errors
     for title in titles:
         if not isinstance(title, dict):
             raise AnalysisError("Каждый титр должен быть объектом JSON")
@@ -205,6 +211,7 @@ def resolve_plan(plan: dict, path: Path, *, allow_title_errors: bool = False) ->
     return {"spec": plan, "path": str(path), "analysis": str(analysis), "source": str(source),
             "settings": settings, "shots": resolved, "frames": cursor_frames,
             "duration_s": cursor_frames / settings["fps"], "titles": ordered,
+            "transitions": transitions,
             "validation_errors": title_errors}
 
 
@@ -388,10 +395,16 @@ def write_review(plan: dict, output: Path, state: dict) -> None:
     text += ["## Титры на шкале фильма", ""]
     text += [f"{timestamp(t['start_s'])}–{timestamp(t['end_s'])}: {t['text']}" for t in plan["titles"]]
     text += [""]
+    text += ["## Переходы", ""]
+    for edge in plan["transitions"]:
+        text += [f"- {edge['from_shot_id']} → {edge['to_shot_id']}: {edge['type']}, "
+                 f"{edge['duration_s']:.3f} с; {timestamp(edge['start_s'])}–{timestamp(edge['end_s'])}"]
+    text += [""]
     notes = spec.get("uncertainties", [])
     text += ["## Неточности и ограничения", "", *[f"- {note}" for note in notes], "",
              "## Сборка", "", f"Время запуска: {state.get('wall_time_s', 0):.1f} с. "
-             f"Из кеша: {sum(s.get('cache_hit', False) for s in state['shots'])} из {len(plan['shots'])} сцен.", "",
+             f"Из кеша: {sum(s.get('cache_hit', False) for s in state['shots'])} из {len(state['shots'])} участков. "
+             f"Переходов: {len(plan['transitions'])}.", "",
              "Общая громкость измерена до кодирования и выровнена в два прохода: цель −18 LUFS, "
              "предел истинного пика −1,5 dBTP. Длительность и число кадров проверены автоматически. "
              "Художественное качество и слышимость речи проверяются локальным просмотром.", ""]
@@ -410,7 +423,8 @@ def write_review(plan: dict, output: Path, state: dict) -> None:
             + "".join(f'<li>{escape(note)}</li>' for note in notes) + '</ul>'
             '<script>const v=document.getElementById("film");document.querySelectorAll("[data-seek]").forEach(b=>'
             'b.addEventListener("click",()=>{v.currentTime=Number(b.dataset.seek);v.play();v.scrollIntoView({behavior:"smooth",block:"center"})}));</script></html>')
-    atomic_json(output / "timeline.json", {"duration_s": plan["duration_s"], "shots": timeline, "titles": plan["titles"]})
+    atomic_json(output / "timeline.json", {"duration_s": plan["duration_s"], "shots": timeline, "titles": plan["titles"],
+                                           "transitions": plan["transitions"]})
     atomic_text(output / "montage.md", "\n".join(text))
     atomic_text(output / "watch.html", page)
 
@@ -437,11 +451,16 @@ def render(plan_path: Path, output: Path, *, cache: Path | None = None) -> dict:
     atomic_json(output / "plan.json", {**plan["spec"], "analysis": plan["analysis"]})
     atomic_json(output / "render.json", state)
     try:
-        for index, shot in enumerate(plan["shots"], 1):
+        from .transitions import sections, render_section
+        pieces = sections(plan) if plan["transitions"] else None
+        state["total_sections"] = len(pieces) if pieces else len(plan["shots"])
+        state["transition_count"] = len(plan["transitions"])
+        for index, shot in enumerate(pieces or plan["shots"], 1):
             check_pause()
-            print(f"Render {index}/{len(plan['shots'])}: {shot['id']} ({shot['duration_s']:.2f}s)", flush=True)
-            result = render_shot(shot, plan["settings"], cache, state["ffmpeg"])
-            state["shots"].append({"id": shot["id"], **result})
+            print(f"Render {index}/{state['total_sections']}: {shot['id']} ({shot['duration_s']:.2f}s)", flush=True)
+            result = (render_section(shot, plan["settings"], cache, state["ffmpeg"]) if pieces
+                      else render_shot(shot, plan["settings"], cache, state["ffmpeg"]))
+            state["shots"].append({"id": shot["id"], "kind": shot.get("section_kind", "body"), **result})
             atomic_json(output / "render.json", state)
         concat = cache / (digest([s["key"] for s in state["shots"]]) + ".ffconcat")
         atomic_text(concat, "ffconcat version 1.0\n" + "".join(
@@ -468,6 +487,9 @@ def render(plan_path: Path, output: Path, *, cache: Path | None = None) -> dict:
         state["validation"] = {"frames": int(video["nb_frames"]), "video_duration_s": float(video["duration"]),
                                "audio_duration_s": float(audio["duration"]), "full_decode": "passed"}
         state["size_bytes"] = temporary.stat().st_size
+        state["cache_counts"] = {kind: {"total": sum(s["kind"] == kind for s in state["shots"]),
+                                      "cached": sum(s["kind"] == kind and s["cache_hit"] for s in state["shots"])}
+                                 for kind in ("body", "transition")}
         os.replace(temporary, output / "film.mp4")
         state["status"] = "complete"
     except BaseException as exc:

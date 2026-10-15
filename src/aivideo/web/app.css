@@ -24,3 +24,15 @@
 .title-card .title-delete:focus-visible{outline:2px solid #ff8585;outline-offset:2px}
 #jobs{overflow-wrap:anywhere}
 @media(max-width:700px){.global-panel{margin:10px 10px 0;padding:12px}.global-toolbar{align-items:flex-start}.global-toolbar h2{flex-basis:100%}.global-tabs{flex-basis:100%}}
+#timeline{position:relative;display:block}
+#timeline .timeline-scene{position:absolute;top:0;height:100%;min-width:0;border-right:1px solid #16231f}
+#timeline .transition-marker{position:absolute;top:10px;transform:translateX(-50%);z-index:2;background:#a58cc0;color:#17101f;width:14px;min-width:14px;height:20px;line-height:20px;font-size:11px}
+.transition-card{display:block;width:100%;white-space:normal;font-size:12px;color:#c8b3e2;border-style:dashed}
+.transition-card.selected{border-color:var(--accent);color:var(--accent)}
+.tabs{flex-wrap:wrap}
+#transition-video{width:100%;max-height:65vh;background:black}
+#transition-limit{overflow-wrap:anywhere}
+.frame-control{display:flex;align-items:center;gap:6px;margin-top:4px;min-width:0}
+.frame-control .frame-input{flex:1;min-width:0;width:0;margin-top:0;appearance:textfield;-moz-appearance:textfield}
+.frame-input::-webkit-inner-spin-button,.frame-input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.frame-control button{display:inline-flex;align-items:center;justify-content:center;flex:0 0 36px;width:36px;height:36px;padding:0;font-size:20px;line-height:1}

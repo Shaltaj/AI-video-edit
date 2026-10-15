@@ -70,7 +70,7 @@ def main() -> int:
             from .render import load_plan, render
             if args.check:
                 plan = load_plan(args.plan)
-                print(f"Plan OK: {len(plan['shots'])} shots, {plan['duration_s']:.2f}s")
+                print(f"Plan OK: {len(plan['shots'])} shots, {len(plan['transitions'])} transitions, {plan['duration_s']:.2f}s")
             else:
                 render(args.plan, args.output)
                 print(f"Render complete: {args.output / 'film.mp4'}")

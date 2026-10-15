@@ -59,7 +59,18 @@
       <div id="scenes"></div>
     </section>
     <section class="panel inspector-panel">
-      <div class="tabs"><button id="scene-tab" class="active">Выбранная сцена</button><button id="film-tab">Готовый фильм</button></div>
+      <div class="tabs"><button id="scene-tab" class="active">Выбранная сцена</button><button id="transition-tab" hidden>Выбранный стык</button><button id="film-tab">Готовый фильм</button></div>
+      <div id="transition-view" hidden>
+        <h2>Переход между сценами</h2>
+        <p id="transition-pair" class="source-name"></p>
+        <label>Тип перехода<select id="transition-type"><option value="cut">Обычная склейка</option><option value="crossfade">Плавное смешивание</option><option value="fade_black">Через чёрный</option></select></label>
+        <label>Длительность, с<input id="transition-duration" type="number" min="0"></label>
+        <p id="transition-limit" class="muted"></p>
+        <p class="muted">Сцены накладываются на время перехода, сокращая фильм. Звук плавно смешивается. Титры сохраняют время.</p>
+        <button id="play-transition">Посмотреть стык</button>
+        <p id="transition-status" class="muted" role="status">Нажмите «Посмотреть стык».</p>
+        <video id="transition-video" controls preload="metadata" hidden></video>
+      </div>
       <div id="scene-view">
         <h2 id="scene-name">Выберите сцену</h2>
         <div id="preview-stage" class="preview-stage"><video id="preview-video" controls preload="metadata" hidden></video><img id="preview-image" alt="Фото сцены" hidden><div id="title-overlay" hidden></div></div>

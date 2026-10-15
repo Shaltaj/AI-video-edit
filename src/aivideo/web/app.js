@@ -2,12 +2,14 @@
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="editor-token"]').content;
 const state = {plan:null, variant:null, revision:null, selected:null, catalog:[], sources:[], variants:[], past:[], future:[],
-  dirty:false, saving:false, conflict:false, generation:0, errors:[], preview:null, previewSerial:0, proxyPending:false};
+  dirty:false, saving:false, conflict:false, generation:0, errors:[], preview:null, previewSerial:0, proxyPending:false,
+  boundary:null, transitionJob:null, transitionGeneration:-1};
 let saveTimer, photoTimer, photoOffset=0, audioContext, videoGain, audioGain;
 const proxyStates=new Map();
 const thumbnailsPending=new Set();
 const thumbnailObserver=new IntersectionObserver(entries=>{for(const observation of entries){if(observation.isIntersecting){thumbnailObserver.unobserve(observation.target);requestThumbnail(observation.target.dataset.entry).catch(fail);}}},{root:document.querySelector('.catalog-panel')});
 const video=$('preview-video'), sound=$('preview-audio');
+const frameControls=new Map();
 function node(tag, text, cls) {const n=document.createElement(tag); if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
 function button(text, handler, cls) {const b=node('button',text,cls);b.type='button';b.addEventListener('click',handler);return b;}
 function titleDeleteButton(handler){
@@ -39,9 +41,40 @@ function time(value) {value=Math.max(0,Number(value)||0);const m=Math.floor(valu
 function clone(value){return structuredClone(value);}
 function source(id){return state.sources.find(s=>s.id===id);}
 function shotDuration(s){return source(s.source_id)?.kind==='image'?s.duration_s:s.end_s-s.start_s;}
-function timeline(){let cursor=0;return state.plan.shots.map(s=>{const start=cursor;cursor+=shotDuration(s);return {id:s.id,start_s:start,end_s:cursor};});}
+const transitionNames={cut:'Обычная склейка',crossfade:'Плавное смешивание',fade_black:'Через чёрный'};
+function edge(a,b){return (state.plan.transitions||[]).find(t=>t.from_shot_id===a&&t.to_shot_id===b);}
+function timeline(){let cursor=0;const fps=state.plan.settings?.fps||30;return state.plan.shots.map((s,i)=>{const start=cursor;cursor+=Math.round(shotDuration(s)*fps);const end=cursor;cursor-=Math.round((edge(s.id,state.plan.shots[i+1]?.id)?.duration_s||0)*fps);return {id:s.id,start_s:start/fps,end_s:end/fps};});}
 function duration(){return state.plan?timeline().at(-1)?.end_s||0:0;}
 function selected(){return state.plan?.shots.find(s=>s.id===state.selected);}
+function frameBounds(id){
+  const fps=state.plan?.settings?.fps||30,shot=selected();
+  if(id==='transition-duration'){const info=boundaryInfo();return {min:1,max:info?boundaryMaxFrames(info,fps):0};}
+  if(!shot)return {min:0,max:0};
+  if(id!=='photo-duration'&&source(shot.source_id).kind==='image')return {min:0,max:0};
+  if(id==='shot-start')return {min:0,max:Math.round(shot.end_s*fps)-1};
+  if(id==='shot-end')return {min:Math.round(shot.start_s*fps)+1,max:Math.floor(source(shot.source_id).duration_s*fps+1e-6)};
+  return {min:1,max:Infinity};
+}
+function syncFrameControl(id){
+  const control=frameControls.get(id);if(!control)return;const input=$(id),fps=state.plan?.settings?.fps||30,{min,max}=frameBounds(id),frames=Math.round(Number(input.value)*fps);
+  input.step='any';input.min=String(Number((min/fps).toFixed(6)));if(Number.isFinite(max))input.max=String(Number((max/fps).toFixed(6)));else input.removeAttribute('max');
+  control.minus.disabled=!state.plan||input.disabled||frames<=min;control.plus.disabled=!state.plan||input.disabled||frames>=max;
+  control.minus.title='−0,5 с';control.plus.title='+0,5 с';
+}
+function nudgeFrame(id,delta){
+  const input=$(id);if(!state.plan||input.disabled)return;const fps=state.plan.settings?.fps||30,{min,max}=frameBounds(id),value=Number(input.value);
+  if(!Number.isFinite(value)||min>max)return;
+  const frames=Math.max(min,Math.min(max,Math.round(value*fps)+delta*Math.round(0.5*fps)));
+  if(frames===Math.round(value*fps)&&Math.abs(value-frames/fps)<1e-6)return;
+  input.value=String(frames/fps);input.dispatchEvent(new Event('change',{bubbles:true}));
+}
+function bindFrameControl(id,label){
+  const input=$(id),wrap=node('div',undefined,'frame-control'),minus=button('−',()=>nudgeFrame(id,-1)),plus=button('+',()=>nudgeFrame(id,1));
+  minus.setAttribute('aria-label',`Уменьшить ${label} на 0,5 с`);plus.setAttribute('aria-label',`Увеличить ${label} на 0,5 с`);
+  input.before(wrap);wrap.append(minus,input,plus);input.classList.add('frame-input');frameControls.set(id,{minus,plus});
+  input.addEventListener('keydown',event=>{if(event.key==='ArrowUp'||event.key==='ArrowDown'){event.preventDefault();nudgeFrame(id,event.key==='ArrowUp'?1:-1);}});
+  syncFrameControl(id);
+}
 function uid(prefix){return prefix+'_'+crypto.randomUUID().replaceAll('-','').slice(0,16);}
 function markConflict(){state.conflict=true;$('conflict').hidden=false;$('save-status').textContent='Конфликт сохранения';$('render').disabled=true;}
 function setMovie(movie){
@@ -59,7 +92,7 @@ function status(){
 }
 function changed(edit){
   state.past.push(clone(state.plan));if(state.past.length>80)state.past.shift();state.future=[];
-  edit(state.plan);state.generation++;state.dirty=true;clearError();refresh();
+  edit(state.plan);pruneTransitions();state.generation++;state.dirty=true;clearError();staleTransition();refresh();
   clearTimeout(saveTimer);saveTimer=setTimeout(()=>save().catch(handleSaveError),600);
 }
 function handleSaveError(error){if(error.status===409)markConflict();else fail(error);status();}
@@ -85,6 +118,7 @@ async function variants(){
   return project;
 }
 async function loadVariant(id){
+  stopTransition();state.boundary=null;state.transitionJob=null;$('transition-tab').hidden=true;
   clearTimeout(saveTimer);const value=await api('/api/plan?variant='+encodeURIComponent(id));
   state.variant=id;state.plan=value.plan;state.revision=value.revision;state.errors=value.errors;
   state.dirty=false;state.conflict=false;state.past=[];state.future=[];state.selected=state.plan.shots[0]?.id;
@@ -133,18 +167,22 @@ function renderScenes(){
     card.append(actions);card.addEventListener('click',()=>choose(shot.id));
     card.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain',shot.id);card.classList.add('dragging')});card.addEventListener('dragend',()=>card.classList.remove('dragging'));card.addEventListener('dragover',e=>e.preventDefault());
     card.addEventListener('drop',e=>{e.preventDefault();const id=e.dataTransfer.getData('text/plain');if(id!==shot.id&&state.plan.shots.some(s=>s.id===id))changed(plan=>{const i=plan.shots.findIndex(s=>s.id===id),item=plan.shots.splice(i,1)[0],j=plan.shots.findIndex(s=>s.id===shot.id);plan.shots.splice(j,0,item);});});
-    $('scenes').append(card);const b=button(String(index+1),()=>choose(shot.id),shot.id===state.selected?'selected':'');b.style.flex=shotDuration(shot);b.title=shot.purpose||shot.source_id;$('timeline').append(b);
+    $('scenes').append(card);const b=button(String(index+1),()=>choose(shot.id),shot.id===state.selected?'selected':'');b.classList.add('timeline-scene');b.style.left=`${100*t.start_s/total}%`;b.style.width=`${100*shotDuration(shot)/total}%`;b.title=shot.purpose||shot.source_id;$('timeline').append(b);
+    const following=state.plan.shots[index+1];if(following){const e=edge(shot.id,following.id),label=transitionNames[e?.type||'cut']+(e?` · ${e.duration_s.toFixed(3)} с`:'');const selected=state.boundary?.[0]===shot.id&&state.boundary?.[1]===following.id;
+      const join=button(label,()=>chooseBoundary(shot.id,following.id),'transition-card'+(selected?' selected':''));join.dataset.from=shot.id;join.dataset.to=following.id;join.setAttribute('aria-label',`Переход ${index+1} → ${index+2}: ${label}`);$('scenes').append(join);
+      const marker=button('◆',()=>chooseBoundary(shot.id,following.id),'transition-marker');marker.style.left=`${100*(t.end_s-(e?.duration_s||0)/2)/total}%`;marker.title=label;marker.setAttribute('aria-label',join.getAttribute('aria-label'));$('timeline').append(marker);
+    }
   }
   for(const title of state.plan.titles||[]){const bar=node('span',title.text);bar.style.left=`${100*title.start_s/total}%`;bar.style.width=`${100*(title.end_s-title.start_s)/total}%`;bar.title=`${time(title.start_s)}–${time(title.end_s)} · ${title.text}`;$('title-track').append(bar);}
 }
 function renderFields(){
-  const shot=selected();if(!shot)return;const m=source(shot.source_id),fps=state.plan.settings?.fps||30;
+  const shot=selected();if(!shot)return;const m=source(shot.source_id);
   $('shot-fields').hidden=false;$('start-label').hidden=$('end-label').hidden=m.kind==='image';$('photo-label').hidden=m.kind!=='image';
-  for(const id of ['shot-start','shot-end','photo-duration'])$(id).step=String(1/fps);
-  $('shot-start').value=shot.start_s??0;$('shot-end').value=shot.end_s??0;$('photo-duration').value=shot.duration_s??3;$('shot-purpose').value=shot.purpose||'';
+  $('shot-start').value=Number((shot.start_s??0).toFixed(6));$('shot-end').value=Number((shot.end_s??0).toFixed(6));$('photo-duration').value=Number((shot.duration_s??3).toFixed(6));$('shot-purpose').value=shot.purpose||'';
   const audio=shot.audio||{mode:m.has_audio?'original':'silence'};$('audio-mode').value=audio.mode;$('audio-mode').querySelector('[value="original"]').disabled=!m.has_audio;
   $('audio-gain').value=Math.round((audio.gain??1)*100);$('audio-start').value=audio.start_s||0;
   $('audio-source-fields').hidden=audio.mode!=='source';$('audio-source').value=audio.source_id||state.sources.find(s=>s.has_audio)?.id||'';
+  for(const id of ['shot-start','shot-end','photo-duration'])syncFrameControl(id);
 }
 function renderTitles(){
   $('titles-variant').textContent='Вариант: '+variantName(state.variant);
@@ -158,8 +196,30 @@ function renderTitles(){
     fields.append(titleDeleteButton(()=>changed(p=>{p.titles=p.titles.filter(t=>t.id!==title.id)})));card.append(fields);$('titles').append(card);
   }
 }
-function refresh(){if(!selected())state.selected=state.plan.shots[0]?.id;renderScenes();renderTitles();renderFields();status();$('undo').disabled=!state.past.length;$('redo').disabled=!state.future.length;updateOverlay();}
-async function choose(id){state.selected=id;renderScenes();renderFields();const shot=selected();if(shot)await preview(shot,false);}
+function refresh(){if(!selected())state.selected=state.plan.shots[0]?.id;if(state.boundary&&!boundaryInfo()){state.boundary=null;stopTransition();$('transition-tab').hidden=true;if(!$('transition-view').hidden)showPreviewView('scene');}renderScenes();renderTitles();renderFields();renderTransitionFields();status();$('undo').disabled=!state.past.length;$('redo').disabled=!state.future.length;updateOverlay();}
+async function choose(id){state.boundary=null;stopTransition();$('transition-tab').hidden=true;state.selected=id;renderScenes();renderFields();const shot=selected();if(shot)await preview(shot,false);}
+function pruneTransitions(){const pairs=new Set(state.plan.shots.slice(1).map((s,i)=>state.plan.shots[i].id+'|'+s.id));state.plan.transitions=(state.plan.transitions||[]).filter(t=>pairs.has(t.from_shot_id+'|'+t.to_shot_id));}
+function boundaryInfo(){if(!state.boundary)return null;const i=state.plan.shots.findIndex(s=>s.id===state.boundary[0]);if(i<0||state.plan.shots[i+1]?.id!==state.boundary[1])return null;return {index:i,a:state.plan.shots[i],b:state.plan.shots[i+1],transition:edge(...state.boundary)};}
+function stopTransition(){$('transition-video').pause();}
+function staleTransition(){if(state.transitionJob){stopTransition();$('transition-status').textContent='Просмотр устарел. Нажмите «Посмотреть стык» для обновления.';}}
+function showPreviewView(name){for(const v of ['scene','transition','film']){$(v+'-view').hidden=v!==name;$(v+'-tab').classList.toggle('active',v===name);}if(name!=='transition')stopTransition();if(name!=='scene')stopPreview();if(name!=='film')$('movie').pause();}
+function chooseBoundary(a,b){++state.previewSerial;stopPreview();state.proxyPending=false;const same=state.boundary?.[0]===a&&state.boundary?.[1]===b;state.boundary=[a,b];if(!same){state.transitionJob=null;$('transition-video').hidden=true;$('transition-video').removeAttribute('src');$('transition-status').textContent='Нажмите «Посмотреть стык».';}$('transition-tab').hidden=false;showPreviewView('transition');renderScenes();renderTransitionFields();}
+function renderTransitionFields(){const info=boundaryInfo();if(!info)return;const {index,a,b,transition}=info,fps=state.plan.settings?.fps||30;
+  const maxFrames=boundaryMaxFrames(info,fps);
+  $('transition-pair').textContent=`${index+1}. ${a.source_id} → ${index+2}. ${b.source_id}`;$('transition-type').value=transition?.type||'cut';$('transition-duration').value=Number((transition?.duration_s??0).toFixed(6));$('transition-duration').disabled=!transition;syncFrameControl('transition-duration');
+  $('transition-limit').textContent=`Фактически: ${(transition?.duration_s||0).toFixed(3)} с (${Math.round((transition?.duration_s||0)*fps)} кадров). Допустимо до ${(Math.max(0,maxFrames)/fps).toFixed(3)} с (${Math.max(0,maxFrames)} кадров).`;
+}
+function boundaryMaxFrames({index,a,b},fps){const previous=state.plan.shots[index-1],next=state.plan.shots[index+2];return Math.max(0,Math.min(Math.round(shotDuration(a)*fps)-Math.round((edge(previous?.id,a.id)?.duration_s||0)*fps)-1,Math.round(shotDuration(b)*fps)-Math.round((edge(b.id,next?.id)?.duration_s||0)*fps)-1));}
+function transitionInput(changeType){const info=boundaryInfo();if(!info)return;const fps=state.plan.settings?.fps||30,type=$('transition-type').value;const value=changeType?(info.transition?.duration_s||.5):Number($('transition-duration').value);const frames=Math.max(1,Math.round(value*fps));
+  changed(p=>{p.transitions=p.transitions.filter(t=>t.from_shot_id!==info.a.id||t.to_shot_id!==info.b.id);if(type!=='cut')p.transitions.push({from_shot_id:info.a.id,to_shot_id:info.b.id,type,duration_s:frames/fps});});
+}
+$('transition-type').onchange=()=>transitionInput(true);$('transition-duration').onchange=()=>transitionInput(false);
+function acceptTransitionJob(job){if(!job||job.id!==state.transitionJob||state.transitionGeneration!==state.generation||!boundaryInfo()||job.from_shot_id!==state.boundary[0]||job.to_shot_id!==state.boundary[1])return;
+  if(job.status==='complete'&&job.url){if($('transition-video').getAttribute('src')!==job.url)$('transition-video').src=job.url;$('transition-video').hidden=false;$('transition-status').textContent='Просмотр готов: переход, звук и титры до итогового сведения.';}
+  else $('transition-status').textContent=job.error||(['paused','interrupted','failed'].includes(job.status)?'Просмотр остановлен. Нажмите «Продолжить» на вкладке «Обработка проекта».':'Готовится просмотр стыка. Состояние — на вкладке «Обработка проекта».');
+}
+$('play-transition').onclick=async()=>{try{await save();if(state.errors.length)throw new Error(state.errors.join('\n'));if(!boundaryInfo())return;const pair=[...state.boundary],generation=state.generation,variant=state.variant;$('transition-status').textContent='Подготовка просмотра…';const job=await api('/api/transition-preview',{variant,revision:state.revision,from_shot_id:pair[0],to_shot_id:pair[1]});if(generation!==state.generation||variant!==state.variant||pair.join('|')!==state.boundary?.join('|'))return;state.transitionJob=job.id;state.transitionGeneration=generation;acceptTransitionJob(job);await pollJobs();}catch(e){handleSaveError(e);}};
+$('transition-tab').onclick=()=>{if(boundaryInfo())showPreviewView('transition');};
 function previewCatalog(e){const shot={source_id:e.source_id,start_s:e.start_s,end_s:e.end_s,duration_s:3,purpose:e.description,audio:{mode:source(e.source_id).has_audio?'original':'silence'}};preview(shot,true).catch(fail);}
 function audioInit(){
   if(!audioContext){audioContext=new AudioContext();videoGain=audioContext.createGain();audioGain=audioContext.createGain();audioContext.createMediaElementSource(video).connect(videoGain).connect(audioContext.destination);audioContext.createMediaElementSource(sound).connect(audioGain).connect(audioContext.destination);}
@@ -170,7 +230,7 @@ async function proxyUrl(id){const job=await api('/api/proxy',{source_id:id});pro
 function proxyMessage(id){return ['paused','interrupted','failed'].includes(proxyStates.get(id))?'Подготовка копии остановлена. Нажмите «Продолжить» на вкладке «Обработка проекта».':'Готовится облегчённая копия. Прогресс и продолжение — на вкладке «Обработка проекта».';}
 async function preview(shot,fromCatalog){
   const serial=++state.previewSerial;stopPreview();photoOffset=0;state.preview={shot:clone(shot),fromCatalog};state.proxyPending=false;
-  $('scene-view').hidden=false;$('film-view').hidden=true;$('scene-tab').classList.add('active');$('film-tab').classList.remove('active');
+  showPreviewView('scene');
   $('shot-fields').hidden=fromCatalog;$('scene-name').textContent=fromCatalog?'Просмотр из каталога':`Сцена ${state.plan.shots.findIndex(s=>s.id===shot.id)+1}`;
   $('preview-status').textContent='Подготовка просмотра…';$('title-overlay').hidden=true;
   const m=source(shot.source_id),entry=matchingEntry(shot),isPhoto=m.kind==='image';
@@ -218,17 +278,19 @@ function shotInput(){
   });preview(selected(),false).catch(fail);
 }
 for(const id of ['shot-start','shot-end','photo-duration','shot-purpose','audio-mode','audio-source','audio-start','audio-gain'])$(id).addEventListener('change',shotInput);
+for(const [id,label] of [['shot-start','начало сцены'],['shot-end','конец сцены'],['photo-duration','длительность фото'],['transition-duration','длительность перехода']])bindFrameControl(id,label);
 for(const id of ['search','kind','source'])$(id).addEventListener('input',renderCatalog);
-$('scene-tab').onclick=()=>{$('scene-view').hidden=false;$('film-view').hidden=true;$('scene-tab').classList.add('active');$('film-tab').classList.remove('active');$('movie').pause();};
-$('film-tab').onclick=()=>{stopPreview();$('scene-view').hidden=true;$('film-view').hidden=false;$('film-tab').classList.add('active');$('scene-tab').classList.remove('active');};
+$('scene-tab').onclick=()=>showPreviewView('scene');
+$('film-tab').onclick=()=>showPreviewView('film');
 $('variants').onchange=async()=>{try{await save();await loadVariant($('variants').value);}catch(e){handleSaveError(e);$('variants').value=state.variant;}};
 function variantDialog(){$('variant-name').value='';$('variant-dialog').showModal();$('variant-name').focus();}
 $('new-variant').onclick=variantDialog;$('keep-copy').onclick=variantDialog;
 $('create-variant').onclick=async()=>{try{clearTimeout(saveTimer);while(state.saving)await new Promise(r=>setTimeout(r,30));const value=await api('/api/variants',{variant:state.variant,name:$('variant-name').value,plan:state.plan});$('variant-dialog').close();await variants();await loadVariant(value.variant);}catch(e){fail(e);}};
 $('reload').onclick=()=>loadVariant(state.variant).catch(fail);
 $('add-title').onclick=()=>{const times=timeline(),current=times.find(t=>t.id===state.selected);let start=current?.start_s||0;const ordered=[...(state.plan.titles||[])].sort((a,b)=>a.start_s-b.start_s);for(const t of ordered)if(start>=t.start_s&&start<t.end_s)start=t.end_s;const next=ordered.find(t=>t.start_s>=start);const end=Math.min(duration(),start+3,next?.start_s??Infinity);if(end<=start)return fail('На выбранном месте нет свободного времени для титра');changed(p=>{p.titles.push({id:uid('title'),text:'Новый титр',start_s:start,end_s:end});});};
-$('undo').onclick=()=>{if(!state.past.length)return;state.future.push(clone(state.plan));state.plan=state.past.pop();state.generation++;state.dirty=true;refresh();if(selected())preview(selected(),false).catch(fail);save().catch(handleSaveError);};
-$('redo').onclick=()=>{if(!state.future.length)return;state.past.push(clone(state.plan));state.plan=state.future.pop();state.generation++;state.dirty=true;refresh();if(selected())preview(selected(),false).catch(fail);save().catch(handleSaveError);};
+function restoredEdit(){state.generation++;state.dirty=true;staleTransition();refresh();if(selected()&&!state.boundary)preview(selected(),false).catch(fail);save().catch(handleSaveError);}
+$('undo').onclick=()=>{if(!state.past.length)return;state.future.push(clone(state.plan));state.plan=state.past.pop();restoredEdit();};
+$('redo').onclick=()=>{if(!state.future.length)return;state.past.push(clone(state.plan));state.plan=state.future.pop();restoredEdit();};
 $('render').onclick=async()=>{try{await save();if(state.errors.length)return;await api('/api/render',{variant:state.variant,revision:state.revision});await pollJobs();}catch(e){handleSaveError(e);}};
 $('history').onclick=async()=>{try{await save();const entries=await api('/api/history?variant='+state.variant);$('history-list').replaceChildren();for(const e of entries){const row=node('div',undefined,'history-entry');row.append(node('span',`${e.saved_at} · ${e.revision.slice(0,8)}`),button('Восстановить',async()=>{try{await api('/api/restore',{variant:state.variant,revision:state.revision,history_revision:e.revision});$('history-dialog').close();await loadVariant(state.variant);}catch(error){handleSaveError(error);}}));$('history-list').append(row);}$('history-dialog').showModal();}catch(e){handleSaveError(e);}};
 async function pollJobs(){
@@ -238,19 +300,21 @@ async function pollJobs(){
   const recent=jobs.filter(j=>j.status!=='complete').concat(jobs.filter(j=>j.status==='complete').slice(0,4));
   if(!recent.length)$('jobs').append(node('p','Заданий пока нет.','muted'));
   const labels={queued:'В очереди',running:'Выполняется',complete:'Готово',paused:'На паузе',interrupted:'Ожидает продолжения',failed:'Ошибка'};
-  for(const job of recent){const card=node('div',undefined,'job');card.dataset.job=job.id;card.append(node('strong',`${job.kind==='render'?'Сборка фильма':job.kind==='proxy'?'Копия для просмотра':'Миниатюра'} · ${labels[job.status]}`));
-    if(job.kind==='render')card.append(node('p',variantName(job.variant),'job-variant'));
+  for(const job of recent){const card=node('div',undefined,'job');card.dataset.job=job.id;card.append(node('strong',`${job.kind==='render'?'Сборка фильма':job.kind==='transition_preview'?'Просмотр стыка':job.kind==='proxy'?'Копия для просмотра':'Миниатюра'} · ${labels[job.status]}`));
+    if(job.variant)card.append(node('p',variantName(job.variant),'job-variant'));
+    if(job.kind==='transition_preview')card.append(node('p',`${job.from_shot_id} → ${job.to_shot_id}`));
     if(job.progress){const p=job.progress;card.append(node('p',`${p.stage}: ${p.done}/${p.total}; из кеша ${p.cached}`));const bar=node('progress');bar.max=p.total;bar.value=p.done;card.append(bar);}if(job.source_id)card.append(node('p',job.source_id,'source-name'));if(job.wall_time_s!==undefined)card.append(node('small',`${job.wall_time_s.toFixed(1)} с`));if(job.error)card.append(node('p',job.error));
     if(['running','queued'].includes(job.status))card.append(button('Пауза',async()=>{await api('/api/pause',{id:job.id});pollJobs().catch(fail);}));
     if(['paused','interrupted','failed'].includes(job.status))card.append(button('Продолжить',async()=>{await api('/api/resume',{id:job.id});pollJobs().catch(fail);}));$('jobs').append(card);
   }
+  acceptTransitionJob(jobs.find(j=>j.id===state.transitionJob));
   if(state.proxyPending&&state.preview){const p=state.preview;await preview(p.fromCatalog?p.shot:selected()||p.shot,p.fromCatalog);}
   for(const id of [...thumbnailsPending])await requestThumbnail(id);
 }
 async function pollPlan(){
   if(!state.variant||state.saving||state.conflict)return;
   const value=await api('/api/plan?variant='+state.variant);
-  if(value.revision!==state.revision){if(state.dirty)markConflict();else{state.plan=value.plan;state.revision=value.revision;state.errors=value.errors;refresh();if(selected())await preview(selected(),false);}}
+  if(value.revision!==state.revision){if(state.dirty)markConflict();else{state.plan=value.plan;state.revision=value.revision;state.errors=value.errors;state.generation++;staleTransition();refresh();if(selected()&&!state.boundary)await preview(selected(),false);}}
   setMovie(value.movie);
 }
 window.addEventListener('beforeunload',e=>{if(state.dirty||state.saving){e.preventDefault();e.returnValue='';}});

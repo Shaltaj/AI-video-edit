@@ -55,9 +55,9 @@ def test_store_migration_history_conflict_variants_and_title_errors(edit_assets,
     path, original = edit_assets
     store = EditorStore(path, tmp_path / "state")
     initial = store.get(store.default_id)
-    assert initial["plan"]["schema_version"] == 2 and load_json(path)["schema_version"] == 1
+    assert initial["plan"]["schema_version"] == 3 and load_json(path)["schema_version"] == 1
     saved = store.save(store.default_id, initial["plan"], initial["revision"])
-    assert load_json(path)["schema_version"] == 2
+    assert load_json(path)["schema_version"] == 3
     assert (store.root / "backups" / f"{store.default_id}-v1.json").exists()
     other = store.create(store.default_id, "Другой вариант", saved["plan"])
     assert other["variant"] != store.default_id
@@ -122,7 +122,7 @@ def test_api_ranges_registered_files_and_conflicts(local_editor, tmp_path):
     bad = local_http.post(address + "/api/plan", json={**value, "revision": "wrong"}, headers=headers)
     assert bad.status_code == 409
     current = local_http.post(address + "/api/plan", json=value, headers=headers)
-    assert current.status_code == 200 and current.json()["plan"]["schema_version"] == 2
+    assert current.status_code == 200 and current.json()["plan"]["schema_version"] == 3
     cat = local_http.get(address + "/api/catalog").json()
     assert len(cat["entries"]) == 3
 

@@ -10,6 +10,8 @@ import uuid
 
 from .common import AnalysisError, ROOT, RUNS, atomic_json, digest, load_json, now, offline_environment
 from .editor_store import EditorStore, movie_digest
+from .render import load_plan
+from .transitions import preview_spec
 
 
 class JobQueue:
@@ -47,10 +49,33 @@ class JobQueue:
             progress = Path(job.get("output", "")) / "render.json"
             if job["kind"] == "render" and progress.is_file():
                 state = load_json(progress)
-                job["progress"] = {"done": len(state.get("shots", [])), "total": job["total_shots"],
-                                   "stage": "сцены" if len(state.get("shots", [])) < job["total_shots"] else "сведение и проверка",
+                total = state.get("total_sections", job["total_shots"])
+                job["progress"] = {"done": len(state.get("shots", [])), "total": total,
+                                   "stage": "участки и переходы" if len(state.get("shots", [])) < total else "сведение и проверка",
                                    "cached": sum(s["cache_hit"] for s in state.get("shots", []))}
+            preview_progress = self.path(job["id"]).parent / "progress.json"
+            if job["kind"] == "transition_preview" and preview_progress.exists():
+                job["progress"] = load_json(preview_progress)
         return sorted(jobs, key=lambda j: (j["created_at"], j.get("sequence", 0)), reverse=True)
+
+    def transition_preview(self, variant, expected, from_id, to_id):
+        with self.lock:
+            key = uuid.uuid4().hex
+            folder = self.root / key
+            value = self.store.snapshot(variant, folder / "plan.json", expected)
+            info = preview_spec(load_plan(folder / "plan.json"), from_id, to_id)
+            target = self.store.root / "transition-previews" / f"{info['key']}.mp4"
+            for job in self.list():
+                if (job["kind"] == "transition_preview" and job["fingerprint"] == info["key"]
+                        and job["status"] not in ("failed", "complete")):
+                    return job
+            job = {"id": key, "kind": "transition_preview", "status": "complete" if target.is_file() else "queued",
+                   "created_at": now(), "sequence": time.time_ns(), "variant": variant,
+                   "revision": value["revision"], "from_shot_id": from_id, "to_shot_id": to_id,
+                   "fingerprint": info["key"], "snapshot": str(folder / "plan.json"),
+                   "target": str(target), "cache": str(self.cache), "cache_hit": target.is_file()}
+            atomic_json(folder / "job.json", job)
+            return job
 
     def add_render(self, variant: str, expected: str) -> dict:
         with self.lock:
@@ -154,7 +179,8 @@ class JobQueue:
                 if not pending:
                     continue
                 # Explicit renders take priority over pending proxy work.
-                job = min(pending, key=lambda j: (j["kind"] != "render", j["created_at"], j.get("sequence", 0)))
+                job = min(pending, key=lambda j: ({"render": 0, "transition_preview": 1}.get(j["kind"], 2),
+                                                 j["created_at"], j.get("sequence", 0)))
                 path = self.path(job["id"])
                 job.update(status="running", started_at=now())
                 atomic_json(path, job)
