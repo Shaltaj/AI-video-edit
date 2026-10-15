@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="editor-token" content="__EDITOR_TOKEN__">
+  <title>AI Video · Редактор черновика</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">AI VIDEO · ЛОКАЛЬНО</span><h1>Редактор черновика</h1></div>
+    <div class="toolbar">
+      <label>Вариант <select id="variants" aria-label="Вариант"></select></label>
+      <button id="new-variant">Сохранить как вариант</button>
+      <button id="history">История</button>
+      <button id="render" class="primary">Собрать фильм</button>
+    </div>
+  </header>
+  <section id="project-controls" class="panel global-panel" aria-label="Общие настройки">
+    <div class="global-toolbar">
+      <h2>Общие настройки</h2>
+      <div class="global-tabs" role="tablist" aria-label="Настройки фильма и проекта">
+        <button id="titles-tab" type="button" role="tab" aria-controls="global-titles" aria-selected="false">Титры фильма</button>
+        <button id="jobs-tab" type="button" role="tab" aria-controls="global-jobs" aria-selected="false" tabindex="-1">Обработка проекта <span id="active-job-count" class="job-count" aria-label="Активных заданий: 0">0</span></button>
+      </div>
+      <button id="collapse-global" type="button" aria-controls="global-content" aria-expanded="false" hidden>Свернуть</button>
+    </div>
+    <div id="global-content" hidden>
+      <section id="global-titles" role="tabpanel" aria-labelledby="titles-tab" hidden>
+        <div class="row"><div><h2>Титры фильма</h2><p id="titles-variant" class="muted"></p></div><button id="add-title">Добавить титр</button></div>
+        <p class="muted">Время от начала выбранного фильма. Титр может проходить через склейки и сохраняет время при перестановке сцен.</p>
+        <div id="titles"></div>
+      </section>
+      <section id="global-jobs" role="tabpanel" aria-labelledby="jobs-tab" hidden>
+        <h2>Обработка проекта</h2><div id="jobs"></div>
+      </section>
+    </div>
+  </section>
+  <div class="statusline"><span id="save-status" role="status">Загрузка…</span><span id="duration"></span></div>
+  <div id="error" role="alert" hidden></div>
+  <div id="conflict" hidden>План изменён в другом окне или через Codex.
+    <button id="reload">Перечитать план</button><button id="keep-copy">Сохранить мои правки отдельным вариантом</button>
+  </div>
+  <main>
+    <aside class="panel catalog-panel">
+      <h2>Каталог материалов</h2>
+      <input id="search" type="search" placeholder="Найти в описаниях…" aria-label="Поиск в каталоге">
+      <div class="filters"><select id="kind" aria-label="Тип материала"><option value="">Все типы</option><option value="video">Видео</option><option value="image">Фото</option></select>
+        <select id="source" aria-label="Исходник"><option value="">Все исходники</option></select></div>
+      <p id="catalog-count" class="muted"></p><div id="catalog"></div>
+    </aside>
+    <section class="panel montage-panel">
+      <div class="row"><h2>Монтаж</h2><div><button id="undo" title="Отменить правку">↶</button><button id="redo" title="Повторить правку">↷</button></div></div>
+      <div id="timeline" aria-label="Шкала сцен"></div>
+      <div id="title-track" aria-label="Шкала титров"></div>
+      <p class="muted">Перетаскивайте сцены или используйте стрелки. Титры остаются на времени фильма.</p>
+      <div id="scenes"></div>
+    </section>
+    <section class="panel inspector-panel">
+      <div class="tabs"><button id="scene-tab" class="active">Выбранная сцена</button><button id="film-tab">Готовый фильм</button></div>
+      <div id="scene-view">
+        <h2 id="scene-name">Выберите сцену</h2>
+        <div id="preview-stage" class="preview-stage"><video id="preview-video" controls preload="metadata" hidden></video><img id="preview-image" alt="Фото сцены" hidden><div id="title-overlay" hidden></div></div>
+        <audio id="preview-audio" preload="metadata"></audio>
+        <p id="preview-status" class="muted">Выберите сцену для просмотра.</p>
+        <div class="row"><button id="play-scene">▶ С начала сцены</button><span id="play-time" class="muted"></span></div>
+        <p class="muted">Предпросмотр до итогового сведения звука. Полный фильм обновится после сборки.</p>
+        <div id="shot-fields" hidden>
+          <div class="fields"><label id="start-label">Начало в исходнике, с<input id="shot-start" type="number" min="0"></label><label id="end-label">Конец в исходнике, с<input id="shot-end" type="number" min="0"></label><label id="photo-label" hidden>Длительность фото, с<input id="photo-duration" type="number" min="0.033333"></label></div>
+          <label>Роль сцены<textarea id="shot-purpose" rows="2"></textarea></label>
+          <h3>Звук сцены</h3>
+          <label>Дорожка<select id="audio-mode"><option value="original">Исходный звук</option><option value="silence">Тишина</option><option value="source">Звук другого фрагмента</option></select></label>
+          <div id="audio-source-fields" class="fields" hidden><label>Исходник<select id="audio-source"></select></label><label>Начало звука, с<input id="audio-start" type="number" min="0" step="0.01"></label></div>
+          <label>Громкость, %<input id="audio-gain" type="number" min="0" max="400" step="5"></label>
+        </div>
+      </div>
+      <div id="film-view" hidden><h2>Последняя сборка</h2><p id="movie-state"></p><video id="movie" controls preload="metadata"></video><a id="download" download="film.mp4" hidden>Скачать MP4</a></div>
+    </section>
+  </main>
+  <dialog id="variant-dialog"><form method="dialog"><h2>Новый вариант</h2><label>Название<input id="variant-name" maxlength="120" required></label><div class="toolbar"><button value="cancel">Отмена</button><button id="create-variant" type="button" class="primary">Сохранить</button></div></form></dialog>
+  <dialog id="history-dialog"><h2>История сохранений</h2><div id="history-list"></div><form method="dialog"><button>Закрыть</button></form></dialog>
+</body>
+</html>

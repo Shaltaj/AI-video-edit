@@ -1,0 +1,71 @@
+# Portable tools, environments, downloaded models and caches.
+/.tools/
+/.venv/
+/models/
+/cache/
+
+# Local media projects: sources, plans, variants, analysis and rendered results.
+/samples/
+/edits/
+/runs/
+/media/
+/data/
+/input/
+/output/
+
+# One-off acceptance script tied to a local event and its scene identifiers.
+/scripts/verify-editor.py
+
+# Media and model weights remain local even outside the directories above.
+*.[mM][pP]4
+*.[mM][oO][vV]
+*.[mM][kK][vV]
+*.[aA][vV][iI]
+*.[mM]4[vV]
+*.[mM][tT][sS]
+*.[mM]2[tT][sS]
+*.[wW][eE][bB][mM]
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[pP][nN][gG]
+*.[wW][eE][bB][pP]
+*.[hH][eE][iI][cC]
+*.[hH][eE][iI][fF]
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+*.[dD][nN][gG]
+*.[wW][aA][vV]
+*.[mM][pP]3
+*.[mM]4[aA]
+*.[aA][aA][cC]
+*.[fF][lL][aA][cC]
+*.[oO][gG][gG]
+*.safetensors
+*.gguf
+*.onnx
+*.pt
+*.pth
+
+# Local configuration, logs and operating-system files.
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.md
+*.log
+*.ffconcat
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python development artifacts.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/

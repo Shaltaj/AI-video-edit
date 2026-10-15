@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aivideo"
+version = "0.1.0"
+description = "Local, timestamped analysis of personal video collections"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "torch==2.8.0",
+  "torchvision==0.23.0",
+  "transformers==4.57.6",
+  "bitsandbytes==0.47.0",
+  "accelerate>=1.2,<2",
+  "faster-whisper==1.2.1",
+  "ctranslate2==4.6.0",
+  "huggingface-hub>=0.34,<1",
+  "pillow>=11,<13",
+  "numpy>=1.26,<3",
+  "requests[socks]>=2.32,<3",
+  "setuptools==80.9.0",
+  "av==16.0.1",
+]
+
+[project.scripts]
+aivideo = "aivideo.cli:main"
+
+[dependency-groups]
+dev = [
+    "playwright>=1.64.0",
+    "pytest>=8.3,<10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aivideo"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
