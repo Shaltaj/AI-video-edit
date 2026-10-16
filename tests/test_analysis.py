@@ -14,6 +14,29 @@ def photo(path: Path):
     Image.new("RGB", (96, 64), "green").save(path)
 
 
+@pytest.mark.parametrize(("entries", "expected"), [
+    ([], []),
+    ([("video", "clip.mp4")], ["clip.mp4"]),
+    ([("image", "photo.jpg")], ["photo.jpg"]),
+    ([("video", "c.mp4"), ("video", "A.mp4"), ("video", "b.mp4")],
+     ["A.mp4", "b.mp4"]),
+    ([("image", "c.jpg"), ("image", "A.jpg"), ("image", "b.jpg")],
+     ["A.jpg", "b.jpg"]),
+    ([("video", "b.mp4"), ("image", "A.jpg")], ["A.jpg", "b.mp4"]),
+    ([("video", "Clips/c.mp4"), ("image", "Photos/c.jpg"),
+      ("video", "clips/A.mp4"), ("image", "photos/A.jpg"),
+      ("video", "clips/b.mp4"), ("image", "photos/b.jpg")],
+     ["clips/A.mp4", "clips/b.mp4", "photos/A.jpg", "photos/b.jpg"]),
+    ([("image", "B.jpg"), ("image", "a.JPG"), ("image", "A.jpg")],
+     ["A.jpg", "a.JPG"]),
+])
+def test_smoke_selects_available_media_independently_of_input_order(entries, expected):
+    items = [{"id": path, "relative_path": path, "kind": kind} for kind, path in entries]
+    for ordered in (items, list(reversed(items))):
+        selected = media.select_profile({"media": ordered}, "smoke")
+        assert [item["id"] for item in selected] == expected
+
+
 def test_intervals_cover_tail_without_overlap():
     intervals = media.windows(20.125)
     assert intervals == [(0.0, 10.0), (10.0, 20.0), (20.0, 20.125)]
@@ -119,7 +142,8 @@ def test_actual_video_metadata_audio_and_timestamped_frames(video_collection, tm
     assert media.prepare_frames(silent, 1.0, 2.1, tmp_path / "cache", 2, 96, "cpu")["cache_hit"]
 
 
-def test_interrupted_pipeline_resumes_only_missing_operations(tmp_path, monkeypatch):
+@pytest.mark.parametrize("managed", [False, True])
+def test_interrupted_pipeline_resumes_only_missing_operations(tmp_path, monkeypatch, managed):
     source = tmp_path / "Фото"
     photo(source / "1.jpg")
     photo(source / "2.jpg")
@@ -143,16 +167,23 @@ def test_interrupted_pipeline_resumes_only_missing_operations(tmp_path, monkeypa
         atomic_json(Path(job["phase_output"]), {"kind": "visual", "metrics": {"wall_time_s": 0}})
     monkeypatch.setattr(pipeline, "run_worker", fake_worker)
     output = tmp_path / "output"
+    options = {"cache_root": tmp_path / "Рабочий проект/cache/analysis", "relative_paths": True} if managed else {}
     with pytest.raises(KeyboardInterrupt):
-        pipeline.analyze(source, output, "sample")
+        pipeline.analyze(source, output, "sample", **options)
     assert load_json(output / "run.json")["status"] == "interrupted"
     assert len((output / "segments.jsonl").read_text(encoding="utf-8").splitlines()) == 1
-    result = pipeline.analyze(source, output, "sample")
+    result = pipeline.analyze(source, output, "sample", **options)
     assert result["status"] == "complete"
     assert seen == ["1.jpg", "2.jpg"]
     assert result["cache_stats"]["visual"] == {"total": 2, "computed": 1, "cached": 1}
+    if managed:
+        state = load_json(output / "run.json")
+        assert state["relative_paths"] and not Path(state["cache"]).is_absolute()
+        assert all(not Path(frame["path"]).is_absolute() for job in state["visual_jobs"] for frame in job["frames"])
+        assert (tmp_path / "Рабочий проект/cache/analysis/results").is_dir()
+        assert not (tmp_path / "runs/cache").exists()
     page = (output / "preview.html").read_text(encoding="utf-8")
     assert "&lt;script&gt;bad&lt;/script&gt;" in page
     assert "<script>bad</script>" not in page
-    pipeline.analyze(source, output, "sample", fps=1)
+    pipeline.analyze(source, output, "sample", fps=1, **options)
     assert seen == ["1.jpg", "2.jpg", "1.jpg", "2.jpg"]

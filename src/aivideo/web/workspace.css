@@ -1,0 +1,25 @@
+.workspace-main{display:block;max-width:1450px;margin:auto;padding:18px}
+.workspace-main .panel{margin-bottom:18px}
+.workspace-main .row{gap:14px;flex-wrap:wrap}
+.workspace-main nav a{padding:6px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px}
+.project-card,.check-card{padding:15px;border:1px solid var(--line);border-radius:7px;min-width:0;overflow-wrap:anywhere}
+.project-card h3{margin-top:0}.project-card p{white-space:pre-wrap}
+#project-paths{white-space:pre-wrap}
+.check-card{margin:12px 0}.check-card.ready{border-left:4px solid var(--accent)}.check-card.error,.check-card.missing{border-left:4px solid #eaa883}
+.check-card details{margin-top:8px}.check-card pre{max-height:220px}
+.project-tabs{padding-top:12px}.project-tabs .active{border-color:var(--accent);color:var(--accent)}
+.path-control{display:flex;align-items:center;gap:8px;min-width:0;margin-top:4px}.path-control input{min-width:0;flex:1;margin:0}.path-control button{flex-shrink:0}
+.form-error{color:#ffb0b0;white-space:pre-wrap}
+#source-files,#analysis-catalog{max-height:55vh;overflow:auto;margin-top:12px}
+#source-files p{overflow-wrap:anywhere;padding:6px;border-bottom:1px solid var(--line)}
+.source-row{display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding:8px 0}
+.source-row p{flex:1;min-width:0;margin:0;overflow-wrap:anywhere}#source-files .source-row p{border:0}
+.source-row button{flex-shrink:0}#excluded-sources{margin:14px 0}#excluded-files{max-height:35vh;overflow:auto}
+@media(max-width:500px){.source-row{align-items:flex-start;flex-wrap:wrap}.source-row p{flex-basis:100%}}
+#analysis-catalog details{border-top:1px solid var(--line);padding:12px 0;overflow-wrap:anywhere}
+#analysis-catalog p{white-space:pre-wrap}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%;font-size:12px}
+#processing summary{cursor:pointer;font-weight:600}.project-tab{margin-top:16px}
+#scenario-file{padding:12px}#job-log{max-height:55vh;overflow:auto}
+@media(max-width:700px){.workspace-main{padding:10px}.path-control{flex-wrap:wrap}.path-control input{flex-basis:100%}header nav{flex-wrap:wrap}}

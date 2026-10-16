@@ -6,9 +6,7 @@ from pathlib import Path
 import re
 import time
 
-from PIL import Image, ImageOps
-
-from .common import (AnalysisError, SCHEMA_VERSION, atomic_json, command, executable,
+from .common import (AnalysisError, SCHEMA_VERSION, atomic_json, check_pause, command, executable,
                      load_json, now, task_key, tool_version)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".mts", ".webm"}
@@ -21,27 +19,32 @@ def probe(path: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def scan(source: Path) -> dict:
+def scan(source: Path, excluded_sources=()) -> dict:
     source = source.resolve()
     if not source.is_dir():
         raise AnalysisError(f"Папка исходников недоступна: {source}")
-    media, errors = [], []
+    media, errors, excluded = [], [], []
+    excluded_sources = set(excluded_sources)
     for path in sorted(source.rglob("*"), key=lambda p: p.relative_to(source).as_posix().casefold()):
+        check_pause()
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
         if suffix not in VIDEO_EXTENSIONS | IMAGE_EXTENSIONS:
             continue
         relative = path.relative_to(source).as_posix()
-        stat = path.stat()
+        if relative in excluded_sources:
+            excluded.append({"source_id": relative})
+            continue
         item = {"id": relative, "relative_path": relative, "source_root": str(source),
-                "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                 "kind": "video" if suffix in VIDEO_EXTENSIONS else "image"}
         try:
+            stat = path.stat()
+            item.update(size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
             if item["kind"] == "image":
-                with Image.open(path) as image:
-                    corrected = ImageOps.exif_transpose(image)
-                    item.update(width=corrected.width, height=corrected.height,
+                from .images import open_photo
+                with open_photo(path) as image:
+                    item.update(width=image.width, height=image.height,
                                 duration_s=None, fps=None, has_audio=False)
             else:
                 metadata = probe(path)
@@ -60,25 +63,24 @@ def scan(source: Path) -> dict:
                             video_codec=video.get("codec_name"), probe=metadata)
             media.append(item)
         except (AnalysisError, OSError, ValueError, KeyError) as exc:
-            errors.append({"source_id": relative, "error": str(exc)})
+            errors.append({"source_id": relative, "error": str(exc),
+                           **{k: item[k] for k in ("size_bytes", "mtime_ns") if k in item}})
     return {"schema_version": SCHEMA_VERSION, "source_root": str(source),
-            "created_at": now(), "media": media, "errors": errors}
+            "created_at": now(), "media": media, "errors": errors, "excluded": excluded}
 
 
 def select_profile(index: dict, profile: str) -> list[dict]:
     if profile == "sample":
         return [dict(item) for item in index["media"]]
-    targets = {"GX010279.MP4", "DJI_20260905101930_0007_D.MP4"}
-    videos = [dict(item) for item in index["media"]
-              if item["kind"] == "video" and Path(item["relative_path"]).name in targets]
-    found = {Path(item["relative_path"]).name for item in videos}
-    if found != targets:
-        raise AnalysisError(f"Для smoke не найдены: {sorted(targets - found)}")
-    images = sorted((dict(item) for item in index["media"] if item["kind"] == "image"),
-                    key=lambda item: item["relative_path"].casefold())[:2]
-    if len(images) != 2:
-        raise AnalysisError("Для smoke нужны как минимум две фотографии")
-    return sorted(videos + images, key=lambda item: item["relative_path"].casefold())
+
+    def path_order(item):
+        path = item["relative_path"]
+        return path.casefold(), path
+
+    ordered = sorted(index["media"], key=path_order)
+    videos = [dict(item) for item in ordered if item["kind"] == "video"][:2]
+    images = [dict(item) for item in ordered if item["kind"] == "image"][:2]
+    return sorted(videos + images, key=path_order)
 
 
 def windows(duration: float, length: float = 10.0) -> list[tuple[float, float]]:

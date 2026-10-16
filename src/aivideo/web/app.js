@@ -1,6 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="editor-token"]').content;
+const projectBase = document.querySelector('meta[name="project-base"]')?.content||'';
 const state = {plan:null, variant:null, revision:null, selected:null, catalog:[], sources:[], variants:[], past:[], future:[],
   dirty:false, saving:false, conflict:false, generation:0, errors:[], preview:null, previewSerial:0, proxyPending:false,
   boundary:null, transitionJob:null, transitionGeneration:-1};
@@ -32,7 +33,7 @@ $('collapse-global').onclick=()=>{const active=document.querySelector('.global-t
 function fail(error) {$('error').textContent=String(error.message||error);$('error').hidden=false;}
 function clearError() {$('error').hidden=true;}
 async function api(url, body) {
-  const response=await fetch(url,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Editor-Token':token},body:JSON.stringify(body)});
+  const response=await fetch(projectBase+url,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Editor-Token':token},body:JSON.stringify(body)});
   const value=await response.json();
   if(!response.ok){const error=new Error(value.error||response.statusText);error.status=response.status;throw error;}
   return value;
@@ -124,7 +125,7 @@ async function loadVariant(id){
   state.dirty=false;state.conflict=false;state.past=[];state.future=[];state.selected=state.plan.shots[0]?.id;
   $('conflict').hidden=true;$('variants').value=id;clearError();
   if(value.errors.length)fail(value.errors.join('\n'));
-  history.replaceState(null,'','/?variant='+encodeURIComponent(id));setMovie(value.movie);refresh();await choose(state.selected);
+  history.replaceState(null,'',(projectBase?projectBase+'/edit':'/')+'?variant='+encodeURIComponent(id));setMovie(value.movie);refresh();await choose(state.selected);
 }
 function matchingEntry(shot){return state.catalog.find(e=>e.source_id===shot.source_id&&(e.kind==='image'||e.start_s<=shot.start_s&&e.end_s>shot.start_s));}
 function renderCatalog(){

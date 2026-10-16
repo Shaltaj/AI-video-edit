@@ -8,14 +8,16 @@ import time
 
 from .common import atomic_json, executable, load_json, now
 from .render import RenderPaused, render, run_ffmpeg
+from .job_paths import read_job, write_job
 
 
 def execute(job_path: Path) -> None:
-    job = load_json(job_path)
+    job = read_job(job_path)
     began = time.perf_counter()
     try:
         if job["kind"] == "render":
-            state = render(Path(job["snapshot"]), Path(job["output"]), cache=Path(job["cache"]))
+            state = render(Path(job["snapshot"]), Path(job["output"]), cache=Path(job["cache"]),
+                           relative_paths=bool(job.get("workspace_paths")))
             job["result"] = {"frames": state["validation"]["frames"],
                              "duration_s": state["duration_s"], "shots": job["total_shots"],
                              "sections": len(state["shots"]), "transitions": state["transition_count"],
@@ -82,7 +84,7 @@ def execute(job_path: Path) -> None:
     finally:
         job["wall_time_s"] = round(time.perf_counter() - began, 3)
         job["finished_at"] = now()
-        atomic_json(job_path, job)
+        write_job(job_path, job)
 
 
 if __name__ == "__main__":

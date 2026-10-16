@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 from functools import lru_cache
 import importlib.metadata
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -11,14 +13,62 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SOURCE = ROOT / "samples" / "brigada-veterok"
 TOOLS = ROOT / ".tools"
 RUNS = ROOT / "runs"
 SCHEMA_VERSION = 1
+_FILE_LOCK_ERRORS = frozenset({5, 32, 33})
+_FILE_RETRY_TIMEOUT_S = 2.0
+_PROGRESS_WARNINGS: dict[str, float] = {}
+_LOGGER = logging.getLogger(__name__)
 
 
 class AnalysisError(RuntimeError):
     pass
+
+
+def _is_file_lock(exc: OSError) -> bool:
+    # The Windows CRT can report sharing conflicts as EACCES without winerror
+    # when opening a file; os.replace usually reports the native Windows code.
+    return (getattr(exc, "winerror", None) in _FILE_LOCK_ERRORS
+            or (os.name == "nt" and isinstance(exc, PermissionError)
+                and exc.errno in (errno.EACCES, errno.EPERM)))
+
+
+def check_pause() -> None:
+    marker = os.environ.get("AIVIDEO_PAUSE_FILE")
+    if marker and Path(marker).exists():
+        raise KeyboardInterrupt("Обработка приостановлена")
+
+
+def progress(stage: str, done=0, total=0, cached=0) -> None:
+    target = os.environ.get("AIVIDEO_PROGRESS_FILE")
+    if target:
+        try:
+            atomic_json(Path(target), {"stage": stage, "done": done, "total": total, "cached": cached})
+        except OSError as exc:
+            if not _is_file_lock(exc):
+                raise
+            # Telemetry must not invalidate a completed preparation or model result.
+            # Durable run/job/cache writes still propagate failures after retries.
+            current = time.monotonic()
+            if current - _PROGRESS_WARNINGS.get(target, float("-inf")) >= 60:
+                _LOGGER.warning("Не удалось обновить индикатор прогресса %s: %s. Обработка продолжается; следующее обновление повторит запись.", target, exc)
+                _PROGRESS_WARNINGS[target] = current
+
+
+def _retry_file_lock(operation):
+    """Retry short Windows sharing conflicts without changing the operation."""
+    deadline = time.monotonic() + _FILE_RETRY_TIMEOUT_S
+    delay = .01
+    while True:
+        try:
+            return operation()
+        except OSError as exc:
+            remaining = deadline - time.monotonic()
+            if not _is_file_lock(exc) or remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, .25)
 
 
 def atomic_json(path: Path, value: object) -> None:
@@ -30,13 +80,15 @@ def atomic_json(path: Path, value: object) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _retry_file_lock(lambda: os.replace(temporary, path))
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def load_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    # Close the read handle before parsing so Windows writers only wait on I/O.
+    content = _retry_file_lock(lambda: path.read_text(encoding="utf-8"))
+    return json.loads(content)
 
 
 def atomic_text(path: Path, value: str) -> None:
@@ -47,7 +99,7 @@ def atomic_text(path: Path, value: str) -> None:
             stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _retry_file_lock(lambda: os.replace(temporary, path))
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -78,8 +130,24 @@ def executable(name: str) -> Path:
 
 def command(arguments: list, timeout: float | None = None) -> subprocess.CompletedProcess:
     try:
-        process = subprocess.run([str(arg) for arg in arguments], capture_output=True,
-                                 timeout=timeout, check=False)
+        check_pause()
+        began = time.monotonic()
+        child = subprocess.Popen([str(arg) for arg in arguments], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            while True:
+                check_pause()
+                if timeout is not None and time.monotonic() - began > timeout:
+                    raise subprocess.TimeoutExpired(arguments, timeout)
+                try:
+                    stdout, stderr = child.communicate(timeout=0.2)
+                    process = subprocess.CompletedProcess(arguments, child.returncode, stdout, stderr)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException:
+            child.kill()
+            child.communicate()
+            raise
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AnalysisError(str(exc)) from exc
     if process.returncode:

@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 
 from .common import AnalysisError, ROOT, atomic_json, digest, executable, load_json, tool_version
+from .images import photo_input
 
 EFFECTS = {"crossfade": "fade", "fade_black": "fadeblack"}
 SECTION_VERSION = 1
@@ -127,7 +128,7 @@ def render_section(piece, settings, cache, ffmpeg):
                 args += ["-hwaccel", "cuda"]
             args += ["-ss", shot["start_s"] + offset, "-t", duration, "-i", shot["media"]["path"]]
         else:
-            args += ["-loop", "1", "-framerate", fps, "-i", shot["media"]["path"]]
+            args += ["-loop", "1", "-framerate", fps, "-i", photo_input(shot["media"], cache)]
         vf = (f"[{input_index}:v]setpts=PTS-STARTPTS,fps={fps},"
               f"scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
               f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"

@@ -10,7 +10,7 @@ import sys
 import traceback
 
 from .common import (AnalysisError, ROOT, atomic_json, cached_result, complete_result,
-                     load_json, now, offline_environment, versions)
+                     load_json, now, offline_environment, versions, check_pause, progress)
 from .monitor import GPUMonitor
 
 _DLL_HANDLES = []
@@ -82,6 +82,7 @@ def asr_jobs(job: dict) -> None:
                              compute_type="int8_float16", local_files_only=True,
                              cpu_threads=4, num_workers=1)
         for number, item in enumerate(job["items"], 1):
+            check_pause()
             if cached_result(cache, item["key"]):
                 continue
             print(f"[asr {number}/{len(job['items'])}] {item['source_id']}", flush=True)
@@ -121,13 +122,14 @@ def asr_jobs(job: dict) -> None:
                             "language_probability": info.language_probability,
                             "metrics": monitor.result(), "model": model_info,
                             "settings": job["settings"], "created_at": now()})
+            progress("Речь", job.get("cached_count", 0)+number, job.get("total", len(job["items"])), job.get("cached_count", 0))
     atomic_json(Path(job["phase_output"]), {"kind": "asr", "metrics": phase_monitor.result(),
                                            "versions": versions(), "model": model_info})
 
 
 def visual_jobs(job: dict) -> None:
     import torch
-    from PIL import Image, ImageOps
+    from .images import open_photo
     from transformers import AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration
 
     if not torch.cuda.is_available():
@@ -144,6 +146,7 @@ def visual_jobs(job: dict) -> None:
             model_path, local_files_only=True, quantization_config=quantization,
             device_map={"": 0}, torch_dtype=torch.float16, attn_implementation="sdpa").eval()
         for number, item in enumerate(job["items"], 1):
+            check_pause()
             if cached_result(cache, item["key"]):
                 continue
             print(f"[visual {number}/{len(job['items'])}] {item['source_id']} "
@@ -151,8 +154,7 @@ def visual_jobs(job: dict) -> None:
             with GPUMonitor() as monitor:
                 images, content = [], [{"type": "text", "text": VISUAL_PROMPT}]
                 for frame in item["frames"]:
-                    with Image.open(frame["path"]) as original:
-                        image = ImageOps.exif_transpose(original).convert("RGB")
+                    with open_photo(frame["path"]) as image:
                         image.thumbnail((job["settings"]["max_side"], job["settings"]["max_side"]))
                         images.append(image.copy())
                     if frame.get("source_time_s") is not None:
@@ -187,6 +189,7 @@ def visual_jobs(job: dict) -> None:
                             "evidence_times_s": [frame.get("source_time_s") for frame in item["frames"]],
                             "metrics": monitor.result(), "model": model_info,
                             "settings": job["settings"], "created_at": now()})
+            progress("Описание изображения", job.get("cached_count", 0)+number, job.get("total", len(job["items"])), job.get("cached_count", 0))
     atomic_json(Path(job["phase_output"]), {"kind": "visual", "metrics": phase_monitor.result(),
                                            "versions": versions(), "model": model_info})
 

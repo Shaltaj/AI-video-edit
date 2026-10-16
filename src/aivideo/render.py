@@ -15,6 +15,7 @@ import uuid
 from .common import (AnalysisError, ROOT, RUNS, atomic_json, atomic_text, digest,
                      executable, load_json, now, timestamp, tool_version)
 from .media import probe
+from .images import photo_input
 from .report import media_url
 
 RENDER_VERSION = 1
@@ -118,12 +119,15 @@ def resolve_plan(plan: dict, path: Path, *, allow_title_errors: bool = False) ->
         if not isinstance(label, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", label) or label in seen:
             raise AnalysisError(f"Неверный или повторный id сцены: {label}")
         seen.add(label)
-        item = material(shot["source_id"])
+        try:
+            item = material(shot.get("source_id"))
+        except (AnalysisError, OSError, TypeError) as exc:
+            raise AnalysisError(f"{label}.source_id: {exc}") from exc
         if item["kind"] == "video":
             start = number(shot.get("start_s"), f"{label}.start_s")
             end = number(shot.get("end_s"), f"{label}.end_s")
             if not start < end <= item["duration_s"]:
-                raise AnalysisError(f"{label}: диапазон выходит за исходник или пуст")
+                raise AnalysisError(f"{label}.start_s/end_s: диапазон выходит за исходник или пуст")
             duration = end - start
         else:
             start, end = None, None
@@ -150,7 +154,10 @@ def resolve_plan(plan: dict, path: Path, *, allow_title_errors: bool = False) ->
                 raise AnalysisError(f"{label}: у исходника нет аудио")
             audio_item, audio_start = item, start
         elif mode == "source":
-            audio_item = material(audio["source_id"])
+            try:
+                audio_item = material(audio.get("source_id"))
+            except (AnalysisError, OSError, TypeError) as exc:
+                raise AnalysisError(f"{label}.audio.source_id: {exc}") from exc
             audio_start = number(audio.get("start_s"), f"{label}.audio.start_s")
             if not audio_item["has_audio"] or audio_start + duration > audio_item["duration_s"] + 1e-6:
                 raise AnalysisError(f"{label}: неверный диапазон подложенного звука")
@@ -291,7 +298,7 @@ def render_shot(shot: dict, settings: dict, cache: Path, ffmpeg_version: str) ->
             args += ["-hwaccel", "cuda"]
         args += ["-ss", shot["start_s"], "-t", duration, "-i", shot["media"]["path"]]
     else:
-        args += ["-loop", "1", "-framerate", settings["fps"], "-i", shot["media"]["path"]]
+        args += ["-loop", "1", "-framerate", settings["fps"], "-i", photo_input(shot["media"], cache)]
     if shot["audio"]["mode"] == "original":
         audio_input = "0:a:0"
     elif shot["audio_media"] is not None:
@@ -429,7 +436,7 @@ def write_review(plan: dict, output: Path, state: dict) -> None:
     atomic_text(output / "watch.html", page)
 
 
-def render(plan_path: Path, output: Path, *, cache: Path | None = None) -> dict:
+def render(plan_path: Path, output: Path, *, cache: Path | None = None, relative_paths: bool = False) -> dict:
     plan = load_plan(plan_path)
     output = output.resolve()
     cache = (cache or RUNS / "render-cache").resolve()
@@ -448,7 +455,8 @@ def render(plan_path: Path, output: Path, *, cache: Path | None = None) -> dict:
     began = time.perf_counter()
     temporary = output / "film.partial.mp4"
     # A snapshot must remain runnable after moving from edits/ to the result directory.
-    atomic_json(output / "plan.json", {**plan["spec"], "analysis": plan["analysis"]})
+    analysis_path = os.path.relpath(plan["analysis"], output).replace("\\", "/") if relative_paths else plan["analysis"]
+    atomic_json(output / "plan.json", {**plan["spec"], "analysis": analysis_path})
     atomic_json(output / "render.json", state)
     try:
         from .transitions import sections, render_section

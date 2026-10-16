@@ -6,10 +6,11 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import threading
 
 from .common import (AnalysisError, ROOT, RUNS, SCHEMA_VERSION, atomic_json, atomic_text,
                      cached_result, digest, load_json, now, offline_environment,
-                     task_key, tool_version, versions)
+                     task_key, tool_version, versions, check_pause, progress)
 from .media import prepare_audio, prepare_frames, scan, select_profile, windows
 from .models import model_manifest
 from .worker import VISUAL_PROMPT
@@ -27,12 +28,18 @@ def run_worker(job: dict, folder: Path) -> None:
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace",
                                    env=offline_environment(), cwd=ROOT)
-        try:
+        def copy_output():
             assert process.stdout is not None
             for line in process.stdout:
                 print(line, end="", flush=True)
                 log.write(line)
                 log.flush()
+        reader = threading.Thread(target=copy_output, daemon=True)
+        reader.start()
+        try:
+            while process.poll() is None:
+                check_pause()
+                time.sleep(.1)
             code = process.wait()
         except BaseException:
             process.terminate()
@@ -42,6 +49,8 @@ def run_worker(job: dict, folder: Path) -> None:
                 process.kill()
                 process.wait()
             raise
+        finally:
+            reader.join(timeout=5)
         if code:
             raise AnalysisError(f"Этап {mode} завершился с кодом {code}. "
                                 f"Диагностика: {folder / (mode + '-error.json')}; "
@@ -68,8 +77,12 @@ def doctor(output: Path, require_models: bool = True) -> dict:
     return result
 
 
-def result_references(run: dict) -> tuple[list[dict], list[dict]]:
+def result_references(run: dict, folder: Path | None = None) -> tuple[list[dict], list[dict]]:
     cache = Path(run["cache"])
+    if run.get("relative_paths"):
+        if folder is None:
+            raise AnalysisError("Для относительного каталога укажите папку анализа")
+        cache = (folder / cache).resolve()
     visual, transcripts = [], []
     for job in run.get("visual_jobs", []):
         value = cached_result(cache, job["key"])
@@ -83,7 +96,8 @@ def result_references(run: dict) -> tuple[list[dict], list[dict]]:
 
 
 def analyze(source: Path, output: Path, profile: str, *, window_s: float = 10.0,
-            fps: float = 2.0, max_side: int = 512, decode: str = "cuda") -> dict:
+            fps: float = 2.0, max_side: int = 512, decode: str = "cuda", cache_root: Path | None = None,
+            relative_paths: bool = False, excluded_sources=()) -> dict:
     from .report import report
 
     output = output.resolve()
@@ -91,27 +105,57 @@ def analyze(source: Path, output: Path, profile: str, *, window_s: float = 10.0,
     if output == source or source in output.parents:
         raise AnalysisError("Результаты должны находиться вне папки исходников")
     output.mkdir(parents=True, exist_ok=True)
-    cache = RUNS / "cache" / "results"
-    preparation_cache = RUNS / "cache" / "prepared"
+    cache_root = (cache_root or RUNS / "cache").resolve()
+    if cache_root == source or source in cache_root.parents:
+        raise AnalysisError("Кеш должен находиться вне исходников")
+    cache = cache_root / "results"
+    preparation_cache = cache_root / "prepared"
+    previous = load_json(output / "run.json") if (output / "run.json").exists() else {}
+    if previous.get("relative_paths"):
+        import os
+        for item in previous.get("preparation", []):
+            for key in ("folder", "path"):
+                if key in item:
+                    item[key] = str((output / item[key]).resolve())
     began = time.perf_counter()
     run = {"schema_version": SCHEMA_VERSION, "created_at": now(), "status": "running",
            "profile": profile, "source_root": str(source), "output": str(output), "cache": str(cache),
-           "visual_jobs": [], "asr_jobs": [], "preparation": [], "errors": [], "phases": [],
+           "visual_jobs": [], "asr_jobs": [], "preparation": previous.get("preparation", []), "errors": [], "phases": [],
            "cache_stats": {},
+           "excluded_sources": sorted(excluded_sources), "skipped_sources": [],
            "versions": versions(), "settings": {"window_s": window_s, "fps": fps,
                                                   "max_side": max_side, "decode": decode}}
+    def save_run():
+        value = run
+        if relative_paths:
+            import os
+            value = json.loads(json.dumps(run))
+            value.update(relative_paths=True, cache=os.path.relpath(cache, output).replace("\\", "/"), output=".")
+            for item in value["preparation"]:
+                for key in ("folder", "path"):
+                    if key in item:
+                        item[key] = os.path.relpath(item[key], output).replace("\\", "/")
+            for job in value["visual_jobs"]:
+                for frame in job.get("frames", []):
+                    frame["path"] = os.path.relpath(frame["path"], output).replace("\\", "/")
+            for job in value["asr_jobs"]:
+                if "audio_path" in job:
+                    job["audio_path"] = os.path.relpath(job["audio_path"], output).replace("\\", "/")
+        atomic_json(output / "run.json", value)
     try:
+        progress("Чтение доступных исходников")
+        check_pause()
+        index = scan(source, excluded_sources)
+        atomic_json(output / "media-index.json", index)
+        run["skipped_sources"] = index["errors"]
+        selected = select_profile(index, profile)
+        if not selected:
+            raise AnalysisError(f"Нет доступных материалов для анализа. Ошибки чтения: {len(index['errors'])}; исключено: {len(index['excluded'])}. Прочитайте список после исправления файлов или верните исключённые.")
+        run["media"] = selected
+        progress("Проверка окружения")
         diagnostic = doctor(output / "doctor")
         models = diagnostic["models"]
         run["models"] = models
-        index = scan(source)
-        atomic_json(output / "media-index.json", index)
-        if index["errors"]:
-            raise AnalysisError(f"Ошибки чтения исходников: {index['errors']}")
-        selected = select_profile(index, profile)
-        if not selected:
-            raise AnalysisError("В подборке нет поддерживаемых материалов")
-        run["media"] = selected
         run["tools"] = diagnostic["tools"]
         asr_settings = {"language": "ru", "compute_type": "int8_float16", "beam_size": 5,
                         "vad_filter": True, "word_timestamps": True,
@@ -122,13 +166,25 @@ def analyze(source: Path, output: Path, profile: str, *, window_s: float = 10.0,
                            "prompt_digest": digest(VISUAL_PROMPT)}
         model_fingerprints = {kind: {**model, "runtime": run["versions"]}
                               for kind, model in models.items()}
-        atomic_json(output / "run.json", run)
-        for media in selected:
+        save_run()
+        progress("Подготовка кадров и звука", 0, len(selected))
+        for number, media in enumerate(selected, 1):
+            check_pause()
             print(f"[prepare] {media['id']}", flush=True)
             if media["kind"] == "image":
-                key = task_key("visual-image", media, visual_settings, model_fingerprints["visual"])
+                from .images import HEIF_EXTENSIONS, prepare_photo
+                image_settings = visual_settings
+                photo_path = str(source / media["relative_path"])
+                if Path(photo_path).suffix.lower() in HEIF_EXTENSIONS:
+                    import importlib.metadata
+                    image_settings = {**visual_settings, "photo_version": 1,
+                                      "pillow_heif": importlib.metadata.version("pillow-heif")}
+                    prepared = prepare_photo(media, preparation_cache)
+                    run["preparation"].append({"source_id": media["id"], "kind": "photo", **prepared})
+                    photo_path = prepared["path"]
+                key = task_key("visual-image", media, image_settings, model_fingerprints["visual"])
                 run["visual_jobs"].append({"key": key, "kind": "image", "source_id": media["id"],
-                    "frames": [{"path": str(source / media["relative_path"]), "source_time_s": None}]})
+                    "frames": [{"path": photo_path, "source_time_s": None}]})
             else:
                 duration = min(media["duration_s"], 60.0) if profile == "smoke" else media["duration_s"]
                 if media["has_audio"]:
@@ -141,6 +197,7 @@ def analyze(source: Path, output: Path, profile: str, *, window_s: float = 10.0,
                         asr_item["audio_path"] = audio["path"]
                     run["asr_jobs"].append(asr_item)
                 for start, end in windows(duration, window_s):
+                    check_pause()
                     settings = {**visual_settings, "start_s": start, "end_s": end,
                                 "decode": decode, "ffmpeg": diagnostic["tools"]["ffmpeg"]}
                     key = task_key("visual-video", media, settings, model_fingerprints["visual"])
@@ -152,20 +209,23 @@ def analyze(source: Path, output: Path, profile: str, *, window_s: float = 10.0,
                         item["frames"] = [{"path": str(Path(prepared["folder"]) / frame["file"]),
                                            "source_time_s": frame["source_time_s"]} for frame in prepared["frames"]]
                     run["visual_jobs"].append(item)
-            atomic_json(output / "run.json", run)
+            save_run()
+            progress("Подготовка кадров и звука", number, len(selected))
         for kind, settings in (("asr", asr_settings), ("visual", visual_settings)):
             jobs = run[f"{kind}_jobs"]
             pending = [item for item in jobs if not cached_result(cache, item["key"])]
             run["cache_stats"][kind] = {"total": len(jobs), "computed": len(pending),
                                         "cached": len(jobs) - len(pending)}
             print(f"[{kind}] pending={len(pending)}, cached={len(jobs) - len(pending)}", flush=True)
+            progress("Речь" if kind == "asr" else "Описание изображения", len(jobs)-len(pending), len(jobs), len(jobs)-len(pending))
             if pending:
                 phase_output = output / f"{kind}-phase.json"
                 run_worker({"mode": kind, "items": pending, "settings": settings,
                             "model": models[kind], "cache": str(cache),
+                            "total": len(jobs), "cached_count": len(jobs)-len(pending),
                             "phase_output": str(phase_output)}, output)
                 run["phases"].append(load_json(phase_output))
-            atomic_json(output / "run.json", run)
+            save_run()
         visual, transcripts = result_references(run)
         if len(visual) != len(run["visual_jobs"]) or len(transcripts) != len(run["asr_jobs"]):
             raise AnalysisError("Не все операции завершились; прогон нельзя считать готовым")
@@ -181,6 +241,6 @@ def analyze(source: Path, output: Path, profile: str, *, window_s: float = 10.0,
     finally:
         run["wall_time_s"] = round(time.perf_counter() - began, 3)
         run["finished_at"] = now()
-        atomic_json(output / "run.json", run)
+        save_run()
         report(output)
     return run

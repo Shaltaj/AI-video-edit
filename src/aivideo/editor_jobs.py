@@ -15,6 +15,9 @@ from .transitions import preview_spec
 
 
 class JobQueue:
+    def _write(self, path, job):
+        atomic_json(path, job)
+
     def __init__(self, store: EditorStore, *, cache: Path | None = None):
         self.store = store
         self.root = store.root / "jobs"
@@ -74,7 +77,7 @@ class JobQueue:
                    "revision": value["revision"], "from_shot_id": from_id, "to_shot_id": to_id,
                    "fingerprint": info["key"], "snapshot": str(folder / "plan.json"),
                    "target": str(target), "cache": str(self.cache), "cache_hit": target.is_file()}
-            atomic_json(folder / "job.json", job)
+            self._write(folder / "job.json", job)
             return job
 
     def add_render(self, variant: str, expected: str) -> dict:
@@ -92,7 +95,7 @@ class JobQueue:
                    "movie_digest": movie_digest(value["plan"], self.store.path(variant)),
                    "snapshot": str(folder / "plan.json"), "output": str(folder / "result"),
                    "cache": str(self.cache), "total_shots": len(value["plan"]["shots"])}
-            atomic_json(folder / "job.json", job)
+            self._write(folder / "job.json", job)
             return job
 
     def proxy(self, source_id: str, *, decode="cuda", encoder="h264_nvenc") -> dict:
@@ -122,7 +125,7 @@ class JobQueue:
                    "fingerprint": fingerprint, "source_id": source_id, "target": str(target),
                    "media": {**{k: v for k, v in media.items() if k != "probe"}, "path": str(source)},
                    "decode": decode, "encoder": encoder}
-            atomic_json(self.root / key / "job.json", job)
+            self._write(self.root / key / "job.json", job)
             return job
 
     def thumbnail(self, source_id: str, time_s: float) -> dict:
@@ -146,7 +149,7 @@ class JobQueue:
             job = {"id": key, "kind": "thumbnail", "status": "queued", "created_at": now(),
                    "sequence": time.time_ns(),
                    "target": str(target), "source": str(source), "time_s": time_s}
-            atomic_json(self.root / key / "job.json", job)
+            self._write(self.root / key / "job.json", job)
             return job
 
     def pause(self, key: str) -> dict:
@@ -157,7 +160,7 @@ class JobQueue:
                 (path.parent / "pause").touch()
             elif job["status"] == "queued":
                 job["status"] = "paused"
-                atomic_json(path, job)
+                self._write(path, job)
             return job
 
     def resume(self, key: str) -> dict:
@@ -169,7 +172,7 @@ class JobQueue:
             (path.parent / "pause").unlink(missing_ok=True)
             job.update(status="queued")
             job.pop("error", None)
-            atomic_json(path, job)
+            self._write(path, job)
             return job
 
     def loop(self):

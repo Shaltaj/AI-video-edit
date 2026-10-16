@@ -21,8 +21,16 @@ def report(folder: Path) -> Path:
     from .pipeline import result_references
 
     run = load_json(folder / "run.json")
-    visual, transcripts = result_references(run)
+    visual, transcripts = result_references(run, folder)
     media_by_id = {item["id"]: item for item in run.get("media", [])}
+    prepared_photos = {}
+    for item in run.get("preparation", []):
+        if item.get("kind") == "photo":
+            path = Path(item["path"])
+            if run.get("relative_paths"):
+                path = (folder / path).resolve()
+            if path.is_file():
+                prepared_photos[item["source_id"]] = path
     elapsed = f"{run['wall_time_s']:.2f} с" if "wall_time_s" in run else "выполняется"
     chunks = ["# Локальный анализ материалов", "", f"Статус: **{run['status']}**. Профиль: `{run['profile']}`.",
               f"Время текущего запуска: {elapsed}.", "",
@@ -45,7 +53,8 @@ def report(folder: Path) -> Path:
                       f'src="{html.escape(relative)}#t={start},{end}"></video>')
         else:
             label = source_id
-            player = f'<img loading="lazy" src="{html.escape(relative)}" alt="{html.escape(source_id)}">'
+            photo_url = media_url(prepared_photos.get(source_id, path), folder)
+            player = f'<img loading="lazy" src="{html.escape(photo_url)}" alt="{html.escape(source_id)}">'
         chunks += [f"## [{label}](preview.html#{anchor})", "", item["description"], ""]
         for uncertainty in item["uncertainties"]:
             chunks += [f"Сомнения: {uncertainty}", ""]
@@ -68,6 +77,11 @@ def report(folder: Path) -> Path:
         chunks += ["## Ошибки обработки", ""]
         for error in run["errors"]:
             chunks += [error, ""]
+    if run.get("skipped_sources") or run.get("excluded_sources"):
+        chunks += ["## Материалы вне анализа", ""]
+        chunks += [f"Исключён пользователем: `{name}`." for name in run.get("excluded_sources", [])]
+        chunks += [f"Ошибка чтения `{e['source_id']}`: {e['error']}" for e in run.get("skipped_sources", [])]
+        chunks += [""]
     chunks += ["## Модели и измерения", "", "```json",
                json.dumps({"models": run.get("models", {}), "settings": run["settings"],
                            "phases": run.get("phases", []), "versions": run["versions"]},

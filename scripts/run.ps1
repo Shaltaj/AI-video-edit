@@ -12,5 +12,12 @@ $env:TOKENIZERS_PARALLELISM = 'false'
 $env:TEMP = Join-Path $projectRoot '.tools\tmp'
 $env:TMP = $env:TEMP
 [void][System.IO.Directory]::CreateDirectory($env:TEMP)
+if ($args.Count -gt 0 -and $args[0] -eq 'ui') {
+    & (Join-Path $PSScriptRoot 'bootstrap.ps1')
+    $uiPython = (Get-Content -LiteralPath '.tools\bootstrap-python.txt' -Encoding UTF8 -Raw).Trim()
+    $env:PYTHONPATH = Join-Path $projectRoot 'src'
+    & $uiPython -m aivideo @args
+    exit $LASTEXITCODE
+}
 & (Join-Path $projectRoot '.venv\Scripts\python.exe') -m aivideo @args
 exit $LASTEXITCODE

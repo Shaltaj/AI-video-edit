@@ -18,33 +18,31 @@ WEB = Path(__file__).parent / "web"
 
 
 class EditorApp:
-    def __init__(self, plan: Path, *, state_root=None, cache=None, proxy_options=None):
-        self.store = EditorStore(plan, state_root)
-        self.lease = (self.store.root / "server.lock").open("a+b")
-        self.lease.seek(0)
-        if not self.lease.read(1):
-            self.lease.write(b"0")
-            self.lease.flush()
-        self.lease.seek(0)
-        try:
-            import msvcrt
-            msvcrt.locking(self.lease.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError as exc:
-            self.lease.close()
-            raise AnalysisError("Редактор этого проекта уже запущен в другом терминале") from exc
-        self.jobs = JobQueue(self.store, cache=cache)
+    def __init__(self, plan: Path | None, *, state_root=None, cache=None, proxy_options=None,
+                 store=None, jobs=None, url_prefix="", baselines_root=RUNS):
+        self.store = store or EditorStore(plan, state_root)
+        self.url_prefix = url_prefix
+        self.lease = None
+        if jobs is None:
+            self.acquire_lease()
+        self.jobs = jobs or JobQueue(self.store, cache=cache)
         self.token = secrets.token_urlsafe(32)
         self.proxy_options = proxy_options or {}
         self.assets: dict[str, Path] = {}
         self.prepared = []
         run = self.store.analysis / "run.json"
         if run.exists():
-            self.prepared = load_json(run).get("preparation", [])
+            analysis_state = load_json(run)
+            self.prepared = analysis_state.get("preparation", [])
+            if analysis_state.get("relative_paths"):
+                for item in self.prepared:
+                    for key in ("folder", "path"):
+                        if key in item:
+                            item[key] = str((self.store.analysis / item[key]).resolve())
         self.catalog = [{**item, "id": digest([item["source_id"], item.get("start_s"), item.get("end_s")])[:20]}
                         for item in self.store.visual]
         self.baselines = []
-        # Import existing successful standalone renders as previous drafts.
-        for path in RUNS.rglob("render.json"):
+        for path in baselines_root.rglob("render.json"):
             if self.store.root in path.parents:
                 continue
             try:
@@ -58,15 +56,35 @@ class EditorApp:
             except (OSError, ValueError, KeyError, TypeError):
                 continue
 
+    def acquire_lease(self):
+        self.lease = (self.store.root / "server.lock").open("a+b")
+        self.lease.seek(0)
+        if not self.lease.read(1):
+            self.lease.write(b"0")
+            self.lease.flush()
+        self.lease.seek(0)
+        try:
+            import msvcrt
+            msvcrt.locking(self.lease.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            self.lease.close()
+            raise AnalysisError("Редактор этого проекта уже запущен в другом терминале") from exc
+
     def asset(self, path: Path) -> str:
         path = path.resolve()
         key = digest(str(path))[:32]
         self.assets[key] = path
-        return "/media/" + key
+        return self.url_prefix + "/media/" + key
 
     def thumbnail_path(self, entry: dict) -> Path | None:
         media = self.store.library[entry["source_id"]]
         if media["kind"] == "image":
+            from .images import HEIF_EXTENSIONS
+            if Path(media["relative_path"]).suffix.lower() in HEIF_EXTENSIONS:
+                for item in reversed(self.prepared):
+                    if item.get("kind") == "photo" and item.get("source_id") == media["id"] and Path(item["path"]).is_file():
+                        return Path(item["path"])
+                return None
             return self.store.source / media["relative_path"]
         point = entry.get("start_s") or 0
         candidates = []
@@ -107,7 +125,8 @@ class EditorApp:
         try:
             self.jobs.close()
         finally:
-            self.lease.close()
+            if self.lease:
+                self.lease.close()
 
     def proxy_payload(self, job: dict):
         value = dict(job)
@@ -144,6 +163,8 @@ class EditorHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(size))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")

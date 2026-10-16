@@ -13,9 +13,6 @@
 /input/
 /output/
 
-# One-off acceptance script tied to a local event and its scene identifiers.
-/scripts/verify-editor.py
-
 # Media and model weights remain local even outside the directories above.
 *.[mM][pP]4
 *.[mM][oO][vV]

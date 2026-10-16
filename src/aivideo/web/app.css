@@ -36,3 +36,4 @@
 .frame-control .frame-input{flex:1;min-width:0;width:0;margin-top:0;appearance:textfield;-moz-appearance:textfield}
 .frame-input::-webkit-inner-spin-button,.frame-input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
 .frame-control button{display:inline-flex;align-items:center;justify-content:center;flex:0 0 36px;width:36px;height:36px;padding:0;font-size:20px;line-height:1}
+.workspace-back{padding:10px 24px;background:#171d25;font-size:13px}

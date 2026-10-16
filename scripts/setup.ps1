@@ -1,5 +1,9 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('all','runtime','ffmpeg')][string]$Component = 'all',
+    [switch]$RepairTorch,
+    [switch]$RepairFFmpeg
+)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -22,18 +26,17 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) { throw ('Command failed: ' + $Executable + ' ' + ($Arguments -join ' ')) }
 }
 
+& (Join-Path $PSScriptRoot 'bootstrap.ps1')
 $uvPath = Join-Path $projectRoot '.tools\uv\uv.exe'
-if (-not (Test-Path -LiteralPath $uvPath)) {
-    Invoke-Checked 'curl.exe' @('--fail','--location','--retry','2','--output','.tools\downloads\uv.zip','https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip')
-    Expand-Archive -LiteralPath '.tools\downloads\uv.zip' -DestinationPath '.tools\uv' -Force
+$pythonVersion = (Get-Content -LiteralPath '.python-version' -Raw).Trim()
+if ($Component -in @('all','runtime')) {
+    $syncArgs = @('sync','--python',$pythonVersion,'--locked')
+    if ($RepairTorch) { $syncArgs += @('--reinstall-package','torch') }
+    Invoke-Checked $uvPath $syncArgs
 }
 
-$pythonVersion = (Get-Content -LiteralPath '.python-version' -Raw).Trim()
-Invoke-Checked $uvPath @('python','install',$pythonVersion,'--no-bin','--no-registry')
-Invoke-Checked $uvPath @('sync','--python',$pythonVersion,'--locked')
-
 $ffmpegPath = Join-Path $projectRoot '.tools\ffmpeg\bin\ffmpeg.exe'
-if (-not (Test-Path -LiteralPath $ffmpegPath)) {
+if ($Component -in @('all','ffmpeg') -and ($RepairFFmpeg -or -not (Test-Path -LiteralPath $ffmpegPath) -or -not (Test-Path -LiteralPath '.tools\ffmpeg\bin\ffprobe.exe'))) {
     $archivePath = Join-Path $projectRoot '.tools\downloads\ffmpeg.zip'
     $checksumPath = Join-Path $projectRoot '.tools\downloads\ffmpeg.sha256'
     $assetName = 'ffmpeg-n8.1-latest-win64-gpl-8.1.zip'
@@ -54,6 +57,6 @@ if (-not (Test-Path -LiteralPath $ffmpegPath)) {
     Copy-Item -LiteralPath $checksumPath -Destination '.tools\ffmpeg\archive.sha256'
 }
 Invoke-Checked $uvPath @('--version')
-Invoke-Checked '.\.venv\Scripts\python.exe' @('--version')
-Invoke-Checked $ffmpegPath @('-version')
+if (Test-Path -LiteralPath '.\.venv\Scripts\python.exe') { Invoke-Checked '.\.venv\Scripts\python.exe' @('--version') }
+if (Test-Path -LiteralPath $ffmpegPath) { Invoke-Checked $ffmpegPath @('-version') }
 Write-Output 'Environment ready. Download model weights with scripts/download-models.ps1, then run scripts/run.ps1 doctor.'

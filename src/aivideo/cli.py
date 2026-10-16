@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 import sys
 
-from .common import AnalysisError, DEFAULT_SOURCE, RUNS, atomic_json
+from .common import AnalysisError, RUNS, atomic_json
 
 
 def positive_number(value: str) -> float:
@@ -22,10 +22,10 @@ def main() -> int:
     diagnostic.add_argument("--output", type=Path, default=RUNS / "doctor")
     diagnostic.add_argument("--skip-models", action="store_true", help="Проверить окружение до загрузки весов")
     inventory = commands.add_parser("scan", help="Каталог исходников")
-    inventory.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    inventory.add_argument("--source", type=Path, required=True)
     inventory.add_argument("--output", type=Path, default=RUNS / "media-index.json")
     analysis = commands.add_parser("analyze", help="Локальное распознавание")
-    analysis.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    analysis.add_argument("--source", type=Path, required=True)
     analysis.add_argument("--profile", choices=("smoke", "sample"), default="smoke")
     analysis.add_argument("--output", type=Path)
     analysis.add_argument("--window-s", type=positive_number, default=10.0)
@@ -42,9 +42,16 @@ def main() -> int:
     editing = commands.add_parser("edit", help="Локальный редактор монтажа")
     editing.add_argument("--plan", type=Path, required=True)
     editing.add_argument("--port", type=int, default=8765)
+    workspace = commands.add_parser("ui", help="Проекты, диагностика, анализ и монтаж")
+    workspace.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     try:
-        if args.command == "doctor":
+        if args.command == "ui":
+            from .workspace import serve
+            if not 0 <= args.port <= 65535:
+                raise AnalysisError("Порт должен находиться в диапазоне 0..65535")
+            serve(args.port)
+        elif args.command == "doctor":
             from .pipeline import doctor
             result = doctor(args.output.resolve(), require_models=not args.skip_models)
             print(f"Doctor OK: {result['gpu']['gpu']}")
