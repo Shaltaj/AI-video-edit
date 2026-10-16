@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import threading
 import uuid
 
@@ -118,9 +119,10 @@ class ProjectRegistry:
                 pass
 
     def get(self, key):
-        if key not in self.projects:
-            raise AnalysisError("Проект недоступен. Откройте его рабочую папку ещё раз.")
-        return self.projects[key]
+        with self.lock:
+            if key not in self.projects:
+                raise AnalysisError("Проект недоступен. Откройте его рабочую папку ещё раз.")
+            return self.projects[key]
 
     def register(self, project):
         with self.lock:
@@ -164,11 +166,89 @@ class ProjectRegistry:
         return self.open(workspace)
 
     def list(self):
-        result = []
-        for key, entry in self.recent.items():
-            available = key in self.projects and self.projects[key].path.is_file()
-            result.append({"id": key, **entry, "available": available})
-        return sorted(result, key=lambda v: v["opened_at"], reverse=True)
+        with self.lock:
+            result = []
+            for key, entry in self.recent.items():
+                available = key in self.projects and self.projects[key].path.is_file()
+                result.append({"id": key, **entry, "workspace": str(Path(entry["manifest"]).parent),
+                               "available": available})
+            return sorted(result, key=lambda v: v["opened_at"], reverse=True)
+
+    def delete(self, key):
+        with self.lock:
+            if key not in self.recent:
+                raise AnalysisError("Проект отсутствует в списке")
+            manifest = Path(self.recent[key]["manifest"])
+            if not manifest.is_absolute() or manifest.name != MANIFEST:
+                raise AnalysisError("Не удалось определить рабочую папку проекта")
+            workspace = manifest.parent
+            if workspace.parent == workspace:
+                raise AnalysisError("Нельзя удалить корень диска")
+            # Some Windows drives support file I/O but cannot resolve a strict final path.
+            # Check links explicitly, including ancestors, before using the normal resolver.
+            if any(path.is_symlink() or path.is_junction() for path in (manifest, *manifest.parents)):
+                raise AnalysisError("Рабочая папка и файл проекта не должны быть ссылками")
+            if workspace.resolve() != workspace:
+                raise AnalysisError("Рабочая папка не должна быть ссылкой")
+            if workspace.exists():
+                project = self.projects.get(key) or Project(manifest)
+                with project.lock:
+                    if manifest.resolve() != manifest:
+                        raise AnalysisError("Рабочая папка и файл проекта не должны быть ссылками")
+                    value = project.read()
+                    if value["id"] != key or project.path != manifest:
+                        raise AnalysisError("Рабочая папка относится к другому проекту")
+                    protected = [self.app_root, self.root, project.source]
+                    for other_key, entry in self.recent.items():
+                        if other_key != key:
+                            protected.append(Path(entry["manifest"]).resolve().parent)
+                    for other_key, other in self.projects.items():
+                        if other_key != key and other.path.is_file():
+                            protected.append(other.source)
+                    for path in protected:
+                        if workspace == path or workspace in path.parents or path in workspace.parents:
+                            raise AnalysisError("Рабочая папка пересекается с исходниками, приложением или другим проектом")
+                    def walk_error(error):
+                        # Some Windows filesystems report an empty scandir search as a missing path.
+                        # Accept it only after an independent listing proves the directory is empty.
+                        if isinstance(error, FileNotFoundError) and error.filename:
+                            failed = Path(error.filename)
+                            if (failed.resolve().is_relative_to(workspace) and failed.is_dir()
+                                    and not failed.is_symlink() and not failed.is_junction()
+                                    and not any(failed.iterdir())):
+                                return
+                        raise error
+                    def remove_error(function, _path, error):
+                        if function is os.scandir:
+                            walk_error(error)
+                        else:
+                            raise error
+                    for folder, directories, files in os.walk(workspace, followlinks=False, onerror=walk_error):
+                        for name in directories + files:
+                            child = Path(folder) / name
+                            if child.is_symlink() or child.is_junction():
+                                raise AnalysisError("В рабочей папке есть ссылки. Уберите их перед удалением проекта.")
+                    # Keep the manifest until all other data is gone, so failed deletions can be retried.
+                    for child in workspace.iterdir():
+                        if child == manifest:
+                            continue
+                        if child.is_dir():
+                            shutil.rmtree(child, onexc=remove_error)
+                        else:
+                            child.unlink()
+                    manifest.unlink()
+                    try:
+                        workspace.rmdir()
+                    except OSError:
+                        atomic_json(manifest, value)
+                        raise
+            elif not Path(workspace.anchor).is_dir():
+                raise AnalysisError("Диск с рабочей папкой недоступен. Подключите его перед удалением проекта.")
+            recent = {project_id: entry for project_id, entry in self.recent.items() if project_id != key}
+            atomic_json(self.path, recent)
+            self.recent = recent
+            self.projects.pop(key, None)
+            return {"id": key, "deleted": True}
 
 
 class ProjectEditorStore(EditorStore):

@@ -42,26 +42,39 @@ class WorkspaceApp:
         self.picker_lock = threading.Lock()
 
     def editor(self, project_id):
-        project = self.registry.get(project_id)
-        analysis = project.folder("analysis")
-        stamp = tuple((analysis/n).stat().st_mtime_ns for n in ("segments.jsonl","media-index.json"))
-        previous = self.editors.get(project_id)
-        if not previous or previous[0] != stamp:
-            store = ProjectEditorStore(project)
-            app = EditorApp(None,store=store,jobs=ProjectQueue(store,self.queue),
-                            url_prefix="/p/"+project_id,baselines_root=project.folder("renders"),proxy_options=self.proxy_options)
-            app.token = self.token
-            if previous:
-                app.assets.update(previous[1].assets)
-            self.editors[project_id] = (stamp,app)
-        return self.editors[project_id][1]
+        with self.queue.lock:
+            project = self.registry.get(project_id)
+            analysis = project.folder("analysis")
+            stamp = tuple((analysis/n).stat().st_mtime_ns for n in ("segments.jsonl","media-index.json"))
+            previous = self.editors.get(project_id)
+            if not previous or previous[0] != stamp:
+                store = ProjectEditorStore(project)
+                app = EditorApp(None,store=store,jobs=ProjectQueue(store,self.queue),
+                                url_prefix="/p/"+project_id,baselines_root=project.folder("renders"),proxy_options=self.proxy_options)
+                app.token = self.token
+                if previous:
+                    app.assets.update(previous[1].assets)
+                self.editors[project_id] = (stamp,app)
+            return self.editors[project_id][1]
 
     def jobs(self):
-        jobs = self.queue.list()
-        for job in jobs:
-            if job.get("project_id"):
-                job["project_name"] = self.registry.get(job["project_id"]).read()["name"]
-        return jobs
+        with self.queue.lock:
+            jobs = self.queue.list()
+            for job in jobs:
+                if job.get("project_id"):
+                    job["project_name"] = self.registry.get(job["project_id"]).read()["name"]
+            return jobs
+
+    def delete_project(self, project_id):
+        with self.queue.lock:
+            jobs = self.queue.list(project_id)
+            if any(job["status"] == "running" or job["id"] == self.queue.active for job in jobs):
+                raise Conflict("Поставьте задания проекта на паузу и дождитесь остановки перед удалением.")
+            value = self.registry.delete(project_id)
+            previous = self.editors.pop(project_id, None)
+            if previous:
+                previous[1].close()
+            return value
 
     def pick_folder(self):
         if not self.picker_lock.acquire(blocking=False):
@@ -205,7 +218,12 @@ class WorkspaceHandler(EditorHandler):
                     match = re.fullmatch(r"/api/projects/([a-f0-9]{32})/(.*)",route)
                     if not match:
                         return self.send_json({"error":"Не найдено"},404)
-                    project, action = app.registry.get(match[1]), match[2]
+                    action = match[2]
+                    if action == "delete":
+                        value = app.delete_project(match[1])
+                        self.send_json(value)
+                        return
+                    project = app.registry.get(match[1])
                     if action == "brief":
                         value = project.update_brief(body["brief"])
                     elif action == "source-selection":

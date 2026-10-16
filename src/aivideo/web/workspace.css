@@ -5,6 +5,8 @@
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px}
 .project-card,.check-card{padding:15px;border:1px solid var(--line);border-radius:7px;min-width:0;overflow-wrap:anywhere}
 .project-card h3{margin-top:0}.project-card p{white-space:pre-wrap}
+.project-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:12px}
+.project-delete{color:#ffb0b0;border-color:#80514c;background:#3b2524}.project-delete:hover{background:#512731}
 #project-paths{white-space:pre-wrap}
 .check-card{margin:12px 0}.check-card.ready{border-left:4px solid var(--accent)}.check-card.error,.check-card.missing{border-left:4px solid #eaa883}
 .check-card details{margin-top:8px}.check-card pre{max-height:220px}

@@ -9,7 +9,25 @@ async function api(path,body){const response=await fetch(path,body===undefined?{
 function projectApi(action,body){return api('/api/projects/'+state.project.id+(action?'/'+action:''),body);}
 function seconds(value){return (Number(value)||0).toFixed(2)+' с';}
 function tab(name){for(const pane of ['analysis','handoff','scenarios','montage']){$('tab-'+pane).hidden=pane!==name;document.querySelector(`[data-tab="${pane}"]`).classList.toggle('active',pane===name);}history.replaceState(null,'','/projects/'+state.project.id+'#'+name);}
-async function loadHome(){const result=await api('/api/projects');$('recent-projects').replaceChildren();for(const p of result.projects){const card=node('article',undefined,'project-card');card.append(node('h3',p.name),node('p',p.manifest,'source-name'));if(p.available){const a=node('a','Открыть проект');a.href='/projects/'+p.id;card.append(a);}else card.append(node('p','Папка недоступна. Используйте «Открыть проект», чтобы указать путь.','muted'));$('recent-projects').append(card);}if(!result.projects.length)$('recent-projects').append(node('p','Проектов пока нет. Создайте первый проект.','muted'));}
+async function loadHome(){
+  const result=await api('/api/projects');$('recent-projects').replaceChildren();
+  for(const p of result.projects){
+    const card=node('article',undefined,'project-card');card.dataset.project=p.id;
+    card.append(node('h3',p.name),node('p',p.manifest,'source-name'));
+    const actions=node('div',undefined,'project-actions');
+    if(p.available){const a=node('a','Открыть проект');a.href='/projects/'+p.id;actions.append(a);}
+    else card.append(node('p','Папка недоступна. Используйте «Открыть проект», чтобы указать путь.','muted'));
+    const remove=button('Удалить',async()=>{
+      if(!confirm(`Удалить проект «${p.name}»?\n\nБудет безвозвратно удалена рабочая папка со всеми данными:\n${p.workspace}\n\nИсходники останутся в своей папке.`))return;
+      clearError();remove.disabled=true;remove.textContent='Удаление…';
+      try{await api('/api/projects/'+p.id+'/delete',{});await loadHome();await pollJobs();}
+      finally{remove.disabled=false;remove.textContent='Удалить';}
+    });
+    remove.classList.add('project-delete');remove.setAttribute('aria-label','Удалить проект '+p.name);
+    actions.append(remove);card.append(actions);$('recent-projects').append(card);
+  }
+  if(!result.projects.length)$('recent-projects').append(node('p','Проектов пока нет. Создайте первый проект.','muted'));
+}
 async function selectSource(id,excluded){
   await projectApi('source-selection',{source_id:id,excluded});
   state.catalogLoaded=false;state.sourcesStamp=null;clearError();await loadProject(state.project.id);

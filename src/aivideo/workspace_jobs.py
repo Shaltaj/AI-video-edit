@@ -32,7 +32,9 @@ class WorkspaceQueue:
 
     def paths(self):
         paths = list(self.root.glob("*/job.json"))
-        for project in self.registry.projects.values():
+        with self.registry.lock:
+            projects = list(self.registry.projects.values())
+        for project in projects:
             if project.root.is_dir():
                 paths += list(project.folder("jobs").glob("*/job.json"))
         return paths
@@ -66,6 +68,8 @@ class WorkspaceQueue:
 
     def enqueue(self, kind, project=None, **parameters):
         with self.lock:
+            if project and self.registry.get(project.id) is not project:
+                raise AnalysisError("Проект больше не открыт")
             for job in self.list():
                 if (job["kind"] == kind and job.get("project_id") == (project.id if project else None)
                         and job["status"] in ("queued", "running") and all(job.get(k) == v for k,v in parameters.items())):
@@ -165,7 +169,10 @@ class ProjectQueue(JobQueue):
         self.lock = scheduler.lock
 
     def _write(self, path, job):
-        write_job(path, job, self.project.id)
+        with self.lock:
+            if self.scheduler.registry.get(self.project.id) is not self.project:
+                raise AnalysisError("Проект больше не открыт")
+            write_job(path, job, self.project.id)
 
     def list(self):
         return self.scheduler.list(self.project.id)
