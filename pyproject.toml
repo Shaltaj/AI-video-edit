@@ -1,11 +1,15 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "aivideo"
 version = "0.1.0"
 description = "Local, timestamped analysis of personal video collections"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY.md"]
+authors = [{ name = "Shaltaj" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "torch==2.8.0",
@@ -26,6 +30,10 @@ dependencies = [
 
 [project.scripts]
 aivideo = "aivideo.cli:main"
+
+[project.urls]
+Repository = "https://github.com/Shaltaj/AI-video-edit"
+Issues = "https://github.com/Shaltaj/AI-video-edit/issues"
 
 [dependency-groups]
 dev = [
